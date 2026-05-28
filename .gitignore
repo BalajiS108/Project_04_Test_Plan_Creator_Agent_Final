@@ -1,0 +1,63 @@
+node_modules/
+dist/
+.env
+.env.*
+.DS_Store
+
+# "Save as" duplicates left by the IDE (e.g. ".env copy", "B.L.A.S.T copy.md")
+*[ -]copy
+*[ -]copy.*
+* copy/
+.env copy
+.env\ copy
+.gitignore\ copy
+
+# Playwright MCP debug snapshots (regenerated every run)
+.playwright-mcp/
+
+# Generated Playwright test scripts (re-created on each "Save Script File")
+tests/generated/
+
+# Execution artifacts — regenerated every run
+html-reports/
+playwright-report/
+test-results/
+screenshots/
+backend/reports/
+backend/videos/
+backend/page_snapshot/
+backend/page_snapshot_after_login/
+backend/*.log
+backend.log
+
+# Built code
+backend/dist/
+
+# Old generated subfolders from earlier runs (also re-created on demand)
+signup_success/
+qaplayground-login/
+qaplayground-signup/
+
+# OS / IDE noise
+*.tsbuildinfo
+.vscode/*.log
+.mcp/*.log
+
+# Stored notification settings (contains SMTP creds + webhook URLs)
+backend/notifications-config.json
+
+# Persisted run history (JSON files per execution)
+backend/history/
+
+# Quality-audit artifacts (visual baselines + per-run diffs)
+backend/visual-baselines/
+backend/visual-diffs/
+
+# Saved API test suites
+backend/api-suites/
+
+# Auth: hashed user credentials + JWT signing key — NEVER commit
+backend/auth/
+
+# CI/CD: GitHub PAT + repo config — NEVER commit
+backend/cicd-config.json

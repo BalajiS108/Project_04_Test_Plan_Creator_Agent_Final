@@ -1,0 +1,178 @@
+- generic [active] [ref=e1]:
+  - link "Skip to content" [ref=e2] [cursor=pointer]:
+    - /url: "#main-content"
+  - banner [ref=e3]:
+    - navigation [ref=e4]:
+      - link "QA PlayGround - Automation Testing Practice Platform QA PlayGround" [ref=e5] [cursor=pointer]:
+        - /url: /
+        - generic [ref=e6]:
+          - img "QA PlayGround - Automation Testing Practice Platform" [ref=e7]
+          - generic [ref=e8]: QA PlayGround
+      - navigation "Main navigation" [ref=e9]:
+        - link "Home" [ref=e10] [cursor=pointer]:
+          - /url: /
+        - link "Study Tracker (New feature)" [ref=e11] [cursor=pointer]:
+          - /url: /study-tracker/dashboard
+          - text: Study Tracker
+          - generic "(New feature)" [ref=e12]: New
+        - link "Bank Demo" [ref=e13] [cursor=pointer]:
+          - /url: /bank
+        - link "Practice" [ref=e14] [cursor=pointer]:
+          - /url: /practice
+        - link "QA Tools" [ref=e15] [cursor=pointer]:
+          - /url: /qa-tools
+        - link "Blog" [ref=e16] [cursor=pointer]:
+          - /url: /blog
+        - button "Toggle theme" [ref=e18] [cursor=pointer]:
+          - img
+          - generic [ref=e19]: Toggle theme
+  - main [ref=e20]:
+    - generic [ref=e23]:
+      - generic [ref=e24]:
+        - img [ref=e27]
+        - heading "Sign In" [level=1] [ref=e30]
+        - generic [ref=e31]: QA PlayGround — access your dashboard
+      - generic [ref=e34]:
+        - generic [ref=e35]:
+          - generic [ref=e36]: Email
+          - textbox "Email" [ref=e37]:
+            - /placeholder: you@example.com
+        - generic [ref=e38]:
+          - generic [ref=e39]:
+            - generic [ref=e40]: Password
+            - link "Forgot password?" [ref=e41] [cursor=pointer]:
+              - /url: /forgot-password
+          - generic [ref=e42]:
+            - textbox "Password" [ref=e43]:
+              - /placeholder: ••••••••
+            - button "Show password" [ref=e44] [cursor=pointer]:
+              - img [ref=e45]
+        - generic [ref=e48]:
+          - checkbox "Remember me for 30 days" [ref=e49] [cursor=pointer]
+          - checkbox
+          - generic [ref=e50] [cursor=pointer]: Remember me for 30 days
+        - button "Sign In" [ref=e51] [cursor=pointer]:
+          - text: Sign In
+          - img
+      - paragraph [ref=e53]:
+        - text: Don't have an account?
+        - link "Sign up" [ref=e54] [cursor=pointer]:
+          - /url: /signup
+  - region "Notifications alt+T"
+  - contentinfo [ref=e55]:
+    - contentinfo "Site footer" [ref=e56]:
+      - generic [ref=e57]:
+        - text: Footer Navigation
+        - generic [ref=e58]:
+          - generic [ref=e59]:
+            - link "QA PlayGround" [ref=e60] [cursor=pointer]:
+              - /url: /
+              - generic [ref=e61]: QA PlayGround
+            - paragraph [ref=e62]: A purpose-built practice platform for QA automation engineers. Learn Selenium, Playwright, and Cypress through hands-on interactive elements and real-world scenarios.
+            - generic [ref=e63]:
+              - generic [ref=e64]:
+                - img [ref=e65]
+                - text: Practice Elements
+              - generic [ref=e70]:
+                - img [ref=e71]
+                - text: Bank Demo
+              - generic [ref=e73]:
+                - img [ref=e74]
+                - text: Study Tracker
+            - generic "Social media links" [ref=e76]:
+              - link "YouTube" [ref=e77] [cursor=pointer]:
+                - /url: https://www.youtube.com/@qaplayground
+                - img [ref=e78]
+              - link "GitHub" [ref=e80] [cursor=pointer]:
+                - /url: https://github.com/kundalik-dev
+                - img [ref=e81]
+              - link "LinkedIn" [ref=e83] [cursor=pointer]:
+                - /url: https://www.linkedin.com/in/kundalik-jadhav
+                - img [ref=e84]
+              - link "Twitter" [ref=e86] [cursor=pointer]:
+                - /url: https://twitter.com/intent/tweet?url=https%3A%2F%2Fwww.qaplayground.com
+                - img [ref=e87]
+              - link "Telegram" [ref=e89] [cursor=pointer]:
+                - /url: https://t.me/share/url?url=https%3A%2F%2Fwww.qaplayground.com
+                - img [ref=e90]
+          - generic [ref=e92]:
+            - paragraph [ref=e93]: Platform
+            - navigation "Platform links" [ref=e94]:
+              - link "Practice Elements 22+ elements" [ref=e95] [cursor=pointer]:
+                - /url: /practice
+                - img [ref=e97]
+                - generic [ref=e102]:
+                  - text: Practice Elements
+                  - generic [ref=e103]: 22+ elements
+              - link "Bank Demo App E2E testing" [ref=e104] [cursor=pointer]:
+                - /url: /bank
+                - img [ref=e106]
+                - generic [ref=e108]:
+                  - text: Bank Demo App
+                  - generic [ref=e109]: E2E testing
+              - link "Study Tracker New" [ref=e110] [cursor=pointer]:
+                - /url: /study-tracker/dashboard
+                - img [ref=e112]
+                - generic [ref=e114]:
+                  - text: Study Tracker
+                  - generic [ref=e115]: New
+              - link "QA Tools Free" [ref=e116] [cursor=pointer]:
+                - /url: /qa-tools
+                - img [ref=e118]
+                - generic [ref=e120]:
+                  - text: QA Tools
+                  - generic [ref=e121]: Free
+              - link "QA Playground Bot Free" [ref=e122] [cursor=pointer]:
+                - /url: https://t.me/QAPlayGround_Bot
+                - img [ref=e124]
+                - generic [ref=e126]:
+                  - text: QA Playground Bot
+                  - generic [ref=e127]: Free
+              - link "QA Capture Extension" [ref=e128] [cursor=pointer]:
+                - /url: https://chromewebstore.google.com/detail/jhgkhnokloeklnagbkgkgcfphafifefg?utm_source=item-share-cb
+                - img [ref=e130]
+                - generic [ref=e135]:
+                  - text: QA Capture
+                  - generic [ref=e136]: Extension
+              - link "QA Playground Clipper Extension" [ref=e137] [cursor=pointer]:
+                - /url: https://chromewebstore.google.com/detail/jegdkegbomfbmhhimfjgacdblcoodfpd?utm_source=item-share-cb
+                - img [ref=e139]
+                - generic [ref=e144]:
+                  - text: QA Playground Clipper
+                  - generic [ref=e145]: Extension
+          - generic [ref=e146]:
+            - paragraph [ref=e147]: Learn
+            - navigation "Learn links" [ref=e148]:
+              - link "Practice Elements" [ref=e149] [cursor=pointer]:
+                - /url: /practice
+              - link "Blog & Tutorials" [ref=e150] [cursor=pointer]:
+                - /url: /blog
+              - link "Free QA Tools" [ref=e151] [cursor=pointer]:
+                - /url: /qa-tools
+              - link "AI Syllabus Generator" [ref=e152] [cursor=pointer]:
+                - /url: /study-tracker/ai-syllabus-prompt
+              - link "Automation Framework" [ref=e153] [cursor=pointer]:
+                - /url: https://github.com/kundalik5545/QA_PlayGround_Automation_Framework
+          - generic [ref=e154]:
+            - paragraph [ref=e155]: Company
+            - navigation "Company links" [ref=e156]:
+              - link "About Us" [ref=e157] [cursor=pointer]:
+                - /url: /about-us
+              - link "Contact Us" [ref=e158] [cursor=pointer]:
+                - /url: /contact-us
+              - link "Raise an Issue" [ref=e159] [cursor=pointer]:
+                - /url: /raise-issue
+              - link "Privacy Policy" [ref=e160] [cursor=pointer]:
+                - /url: /privacy-policy
+              - link "Login" [ref=e161] [cursor=pointer]:
+                - /url: /login
+            - generic [ref=e162]:
+              - paragraph [ref=e163]: "*No account required. Creating a login is entirely optional and is only necessary if you wish to sync your progress in the Study Tracker."
+              - paragraph [ref=e164]: "*Your data is stored locally within your browser for maximum privacy."
+        - generic [ref=e165]:
+          - generic [ref=e166]: © 2026 QA Playground. All rights reserved.
+          - generic [ref=e167]:
+            - text: Built for QA Engineers by
+            - link "Kundalik Jadhav" [ref=e168] [cursor=pointer]:
+              - /url: https://github.com/kundalik-dev
+  - alert [ref=e169]

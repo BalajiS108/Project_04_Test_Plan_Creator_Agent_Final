@@ -1,0 +1,11 @@
+{
+    "mcpServers": {
+        "playwright": {
+            "command": "npx.cmd",
+            "args": [
+                "tsx",
+                "./backend/playwright-mcp.ts"
+            ]
+        }
+    }
+}

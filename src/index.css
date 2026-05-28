@@ -1,0 +1,106 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Lock the page itself against horizontal scrolling.
+     Two-finger touchpad swipe would otherwise scroll the whole body
+     sideways whenever any descendant overflowed.
+     `overflow-x: clip` (not `hidden`) is the right tool here — it clips
+     horizontal overflow without establishing a new scroll container, so
+     vertical scrolling on body keeps working normally. */
+  body {
+    overflow-x: clip;
+  }
+
+  /* Reserve space for the vertical scrollbar even when content fits.
+     Without this, scrolling between pages of different heights makes
+     the scrollbar appear/disappear, which shifts the whole layout by
+     ~15px horizontally — visible as a "dance" or "jitter" while scrolling.
+     `scrollbar-gutter: stable` reserves the gutter permanently. */
+  html {
+    scrollbar-gutter: stable;
+    /* Subpixel rasterization on scroll is what causes text/borders to
+       visibly shimmer. Forcing layer compositing keeps each element
+       rasterized once and just translated during scroll. */
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Thin, subtle scrollbars across the app. The OS default bar was
+     intrusive; this is a 6px translucent slate thumb that fades up on
+     hover. Both webkit (Chrome/Edge/Safari) and Firefox styled. */
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: rgba(100, 116, 139, 0.25);
+    border-radius: 3px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(100, 116, 139, 0.5);
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(100, 116, 139, 0.25) transparent;
+  }
+  html.dark *::-webkit-scrollbar-thumb {
+    background-color: rgba(148, 163, 184, 0.2);
+  }
+  html.dark *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(148, 163, 184, 0.4);
+  }
+  html.dark * {
+    scrollbar-color: rgba(148, 163, 184, 0.2) transparent;
+  }
+
+  body {
+    @apply antialiased bg-slate-100 text-slate-900;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  
+  html.dark body {
+    @apply bg-slate-950 text-slate-100;
+  }
+  html.dark .bg-white {
+    @apply bg-slate-900;
+  }
+  html.dark .bg-slate-50 {
+    @apply bg-slate-800/50;
+  }
+  html.dark .text-slate-900, html.dark .text-slate-800, html.dark .text-slate-700 {
+    @apply text-slate-100;
+  }
+  html.dark .text-slate-600, html.dark .text-slate-500, html.dark .text-slate-400 {
+    @apply text-slate-300;
+  }
+  html.dark .border-slate-200, html.dark .border-slate-100 {
+    @apply border-slate-700;
+  }
+  html.dark input, html.dark select, html.dark textarea {
+    @apply bg-slate-800 text-slate-100 border-slate-700;
+  }
+  html.dark input::placeholder, html.dark textarea::placeholder {
+    color: theme('colors.slate.500');
+  }
+  html.dark .text-blue-600 {
+    @apply text-blue-400;
+  }
+  html.dark .bg-blue-50 {
+    @apply bg-blue-900/30;
+  }
+  html.dark .bg-emerald-50 {
+    @apply bg-emerald-900/30;
+  }
+  html.dark .bg-rose-50 {
+    @apply bg-rose-900/30;
+  }
+  html.dark .shadow-sm, html.dark .shadow-md, html.dark .shadow-lg, html.dark .shadow-xl, html.dark .shadow-2xl {
+    @apply shadow-slate-900/50;
+  }
+}

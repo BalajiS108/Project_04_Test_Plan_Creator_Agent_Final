@@ -1,0 +1,47 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - img [ref=e7]
+      - generic [ref=e10]:
+        - heading "Intelligent Test Planning Agent" [level=1] [ref=e11]
+        - paragraph [ref=e12]: B.L.A.S.T Protocol • Standardized Logic
+    - generic [ref=e13]:
+      - button "History" [ref=e14] [cursor=pointer]:
+        - img [ref=e15]
+        - text: History
+      - button [ref=e19] [cursor=pointer]:
+        - img [ref=e20]
+      - button [ref=e22] [cursor=pointer]:
+        - img [ref=e23]
+  - generic [ref=e26]:
+    - generic [ref=e27]:
+      - generic [ref=e28] [cursor=pointer]:
+        - generic [ref=e29]: "1"
+        - generic [ref=e30]: Setup
+      - generic [ref=e31] [cursor=pointer]:
+        - generic [ref=e32]: "2"
+        - generic [ref=e33]: Fetch Issues
+      - generic [ref=e34] [cursor=pointer]:
+        - generic [ref=e35]: "3"
+        - generic [ref=e36]: Review
+      - generic [ref=e37] [cursor=pointer]:
+        - generic [ref=e38]: "4"
+        - generic [ref=e39]: Plan
+    - main [ref=e40]:
+      - generic [ref=e42]:
+        - heading "Jira Connection" [level=2] [ref=e44]
+        - paragraph [ref=e45]: Connect to your Jira instance to fetch requirements and user stories.
+        - generic [ref=e46]:
+          - generic [ref=e47]:
+            - generic [ref=e48]: Select Jira Connection
+            - generic [ref=e49]:
+              - combobox [ref=e50]:
+                - option "Choose a connection..." [disabled] [selected]
+              - generic:
+                - img
+          - button "Add / Manage Connections" [ref=e51] [cursor=pointer]:
+            - img [ref=e52]
+            - text: Add / Manage Connections
+          - button "Continue to Fetch Issues" [ref=e56] [cursor=pointer]
+  - contentinfo [ref=e57]:
+    - paragraph [ref=e58]: Master System Pilot • Antigravity AI
