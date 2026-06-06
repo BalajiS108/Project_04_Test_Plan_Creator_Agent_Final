@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CI/CD Pipeline Guide — Test Plan Creator Agent V2</title>
+<style>
+  @page {
+    size: A4;
+    margin: 18mm 16mm;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #1f2937;
+    line-height: 1.55;
+    font-size: 11pt;
+    max-width: 850px;
+    margin: 0 auto;
+    padding: 24px 28px 60px;
+  }
+  h1 {
+    font-size: 22pt;
+    color: #0f172a;
+    margin: 0 0 4px;
+    border-bottom: 3px solid #2563eb;
+    padding-bottom: 10px;
+  }
+  h2 {
+    font-size: 15pt;
+    color: #0f172a;
+    margin-top: 28px;
+    border-bottom: 1px solid #cbd5e1;
+    padding-bottom: 4px;
+    page-break-after: avoid;
+  }
+  h3 {
+    font-size: 12pt;
+    color: #1e3a8a;
+    margin-top: 18px;
+    page-break-after: avoid;
+  }
+  h4 {
+    font-size: 11pt;
+    color: #334155;
+    margin-top: 14px;
+    margin-bottom: 6px;
+    page-break-after: avoid;
+  }
+  p { margin: 6px 0 10px; }
+  ul, ol { margin: 6px 0 12px; padding-left: 26px; }
+  li { margin: 4px 0; }
+  code {
+    font-family: "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+    background: #f1f5f9;
+    padding: 1.5px 5px;
+    border-radius: 3px;
+    font-size: 9.5pt;
+    color: #be123c;
+  }
+  pre {
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 12px 14px;
+    border-radius: 6px;
+    font-size: 9pt;
+    line-height: 1.45;
+    overflow-x: auto;
+    page-break-inside: avoid;
+  }
+  pre code { background: transparent; color: inherit; padding: 0; }
+  blockquote {
+    margin: 10px 0;
+    padding: 10px 14px;
+    border-left: 4px solid #2563eb;
+    background: #eff6ff;
+    color: #1e3a8a;
+    border-radius: 4px;
+  }
+  blockquote.warn {
+    border-left-color: #f59e0b;
+    background: #fffbeb;
+    color: #78350f;
+  }
+  blockquote.danger {
+    border-left-color: #ef4444;
+    background: #fef2f2;
+    color: #7f1d1d;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0 14px;
+    font-size: 10pt;
+    page-break-inside: avoid;
+  }
+  th, td {
+    border: 1px solid #cbd5e1;
+    padding: 7px 9px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: #1e3a8a;
+    color: white;
+    font-weight: 600;
+  }
+  tr:nth-child(even) td { background: #f8fafc; }
+  .pill {
+    display: inline-block;
+    font-size: 8.5pt;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .pill-green { background: #d1fae5; color: #065f46; }
+  .pill-red { background: #fee2e2; color: #991b1b; }
+  .pill-yellow { background: #fef3c7; color: #92400e; }
+  .pill-blue { background: #dbeafe; color: #1e40af; }
+  .ascii {
+    background: #0f172a;
+    color: #93c5fd;
+    padding: 14px 16px;
+    border-radius: 6px;
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 9pt;
+    line-height: 1.45;
+    white-space: pre;
+    overflow-x: auto;
+    page-break-inside: avoid;
+  }
+  hr {
+    border: none;
+    border-top: 1.5px dashed #cbd5e1;
+    margin: 24px 0;
+  }
+  .meta {
+    color: #64748b;
+    font-size: 9.5pt;
+    margin: 4px 0 18px;
+  }
+  .toc {
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin: 14px 0 26px;
+    page-break-inside: avoid;
+  }
+  .toc h3 { margin: 0 0 8px; color: #0f172a; }
+  .toc ol { margin: 0; padding-left: 22px; font-size: 10pt; }
+  .toc li { margin: 3px 0; }
+  .toc a { color: #1e40af; text-decoration: none; }
+  .footer {
+    margin-top: 40px;
+    padding-top: 14px;
+    border-top: 1px solid #cbd5e1;
+    color: #64748b;
+    font-size: 9pt;
+    text-align: center;
+  }
+  .print-hint {
+    background: #fef3c7;
+    border: 1px solid #f59e0b;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin-bottom: 24px;
+    color: #78350f;
+    font-size: 10pt;
+  }
+  @media print {
+    .print-hint { display: none; }
+    h2 { page-break-after: avoid; }
+    pre, .ascii, table, blockquote { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<div class="print-hint">
+  <strong>To save as PDF:</strong> open this file in a browser and press <code>Ctrl+P</code> (Windows) or <code>Cmd+P</code> (Mac) → choose <strong>"Save as PDF"</strong> as destination → Save. This hint is hidden in the PDF.
+</div>
+
+<h1>CI/CD Pipeline Guide</h1>
+<div class="meta">Project_04_Test_Plan_Creator_Agent_V2 · GitHub Actions on BalajiS108/AI-Testing-All-About · 2026-06-06</div>
+
+<div class="toc">
+  <h3>Contents</h3>
+  <ol>
+    <li><a href="#understanding">Your mental model — corrections at a glance</a></li>
+    <li><a href="#layers">The three layers of CI/CD in this project</a></li>
+    <li><a href="#trigger">Layer 1: What triggers a workflow run</a></li>
+    <li><a href="#jobs">Layer 1: The three jobs and what they do</a></li>
+    <li><a href="#dashboard">Layer 2: The in-app CI/CD dashboard</a></li>
+    <li><a href="#local">Layer 3: The local CI mirror</a></li>
+    <li><a href="#flow">End-to-end: a code change's journey</a></li>
+    <li><a href="#troubleshoot">Troubleshooting cheat sheet</a></li>
+  </ol>
+</div>
+
+<h2 id="understanding">1. Your mental model — corrections at a glance</h2>
+
+<table>
+  <tr>
+    <th style="width: 40%;">What you said</th>
+    <th>What's actually true</th>
+  </tr>
+  <tr>
+    <td>"Once we push the code then CI/CD pipeline will start"</td>
+    <td><span class="pill pill-yellow">Partly</span> Only pushes to the <strong>main</strong> branch that touch files inside <code>Project_04_Test_Plan_Creator_Agent_V2/</code> trigger CI. Anything else is silently skipped — no run is created.</td>
+  </tr>
+  <tr>
+    <td>"It will commit the code"</td>
+    <td><span class="pill pill-red">No</span> CI never commits. You commit + push; CI runs against your push. The <code>actions/checkout@v4</code> step clones the repo onto a runner VM — that is not committing.</td>
+  </tr>
+  <tr>
+    <td>"check for frontend and backend dependencies for the build"</td>
+    <td><span class="pill pill-yellow">Partly</span> It <em>installs</em> dependencies (<code>npm ci</code>) and runs <code>tsc --noEmit</code> typechecks, then the build job compiles the frontend.</td>
+  </tr>
+  <tr>
+    <td>"main task is to execute the test cases and give reports"</td>
+    <td><span class="pill pill-yellow">Aspirationally</span> That's the intent, but there are no spec files at the project's <code>tests/</code> root yet, so the test step prints a yellow warning and exits. Artifacts are wired up and ready for when you commit the specs.</td>
+  </tr>
+</table>
+
+<blockquote>
+  <strong>Corrected mental model:</strong> You push → GitHub runs typecheck → build → e2e (currently a no-op) → uploads artifacts → marks the commit green/red.
+</blockquote>
+
+<h2 id="layers">2. The three layers of CI/CD in this project</h2>
+
+<div class="ascii">┌──────────────────────────────────────────────────────────────────┐
+│ LAYER 1 — The workflow YAML on GitHub                            │
+│   File:    .github/workflows/e2e-tests.yml                       │
+│           (in the PARENT repo BalajiS108/AI-Testing-All-About)   │
+│   Runs:   on GitHub-hosted Linux runners (free quota)            │
+│   Fires:  push, pull_request, nightly cron, manual               │
+└──────────────────────────────────────────────────────────────────┘
+                                ▲
+                                │ GitHub REST API
+                                │
+┌──────────────────────────────────────────────────────────────────┐
+│ LAYER 2 — The in-app CI/CD dashboard                             │
+│   Frontend: src/components/CICDDashboard.tsx                     │
+│   Backend:  backend/cicd.ts + 7 endpoints in server.ts           │
+│   Config:   backend/cicd-config.json (owner/repo/token)          │
+│   Purpose:  show run history + trigger runs from inside the app  │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ LAYER 3 — The local CI mirror                                    │
+│   Script:   run-ci-locally.sh (npm run ci:local)                 │
+│   Purpose:  replay the same stages on your machine BEFORE push   │
+└──────────────────────────────────────────────────────────────────┘</div>
+
+<p>Layer 1 is the real CI. Layers 2 and 3 are conveniences around it.</p>
+
+<h2 id="trigger">3. Layer 1 — What triggers a workflow run</h2>
+
+<p>The <code>on:</code> block in the workflow YAML defines four triggers:</p>
+
+<pre><code>on:
+  push:
+    branches: [main]
+    paths:
+      - 'Project_04_Test_Plan_Creator_Agent_V2/**'
+      - '.github/workflows/e2e-tests.yml'
+  pull_request:
+    branches: [main]
+    paths: [same as above]
+  schedule:
+    - cron: '0 2 * * *'         # 02:00 UTC nightly
+  workflow_dispatch:             # manual button
+    inputs:
+      reason:
+        description: 'Why are you running this manually?'</code></pre>
+
+<table>
+  <tr><th>Trigger</th><th>When it fires</th></tr>
+  <tr><td><strong>push</strong></td><td>You push a commit to <code>main</code> AND at least one changed file is under <code>Project_04_Test_Plan_Creator_Agent_V2/</code></td></tr>
+  <tr><td><strong>pull_request</strong></td><td>A PR against <code>main</code> with the same path filter</td></tr>
+  <tr><td><strong>schedule</strong></td><td>02:00 UTC every day (≈ 07:30 IST). Catches dependency drift</td></tr>
+  <tr><td><strong>workflow_dispatch</strong></td><td>You click "Run workflow" in GitHub Actions UI OR "Trigger Run" in the in-app dashboard</td></tr>
+</table>
+
+<p>A "concurrency" block then cancels any older run on the same branch when a new push arrives:</p>
+
+<pre><code>concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true</code></pre>
+
+<h2 id="jobs">4. Layer 1 — The three jobs</h2>
+
+<div class="ascii">    typecheck            ← runs first (Node 20, deps cached)
+       │
+       ▼
+   ┌───┴───┐
+   │       │
+ build    e2e            ← run in parallel after typecheck succeeds</div>
+
+<h3>Job 1: typecheck</h3>
+
+<p>Fast TypeScript validation. If your code doesn't compile, fail here before spending compute on browser tests.</p>
+
+<pre><code>steps:
+  - uses: actions/checkout@v4          # clone repo onto runner
+  - uses: actions/setup-node@v4        # install Node 20 + npm cache
+  - run: npm ci                        # frontend deps
+  - run: npx tsc --noEmit              # frontend typecheck
+  - run: npm ci                        # backend deps (working-directory: .../backend)
+  - run: npx tsc --noEmit              # backend typecheck</code></pre>
+
+<p><code>cache: 'npm'</code> hashes <code>package-lock.json</code> and reuses <code>node_modules</code> across runs. First run is slow; subsequent runs save ~30–60 seconds.</p>
+
+<h3>Job 2: build</h3>
+
+<p>Compiles the frontend into <code>dist/</code> and uploads it as a downloadable artifact (kept 7 days).</p>
+
+<pre><code>needs: typecheck
+steps:
+  - uses: actions/checkout@v4
+  - uses: actions/setup-node@v4
+  - run: npm ci
+  - run: npm run build                 # tsc -b && vite build
+  - uses: actions/upload-artifact@v4
+    with:
+      name: frontend-dist
+      path: Project_04_Test_Plan_Creator_Agent_V2/dist
+      retention-days: 7</code></pre>
+
+<h3>Job 3: e2e (the interesting one)</h3>
+
+<p>Hard 30-minute cap. Sets <code>CI=true</code> so Playwright runs headless.</p>
+
+<pre><code>needs: typecheck
+timeout-minutes: 30
+env: { CI: 'true' }
+steps:
+  - uses: actions/checkout@v4
+  - uses: actions/setup-node@v4
+  - run: npm ci                        # frontend deps
+  - run: npm ci                        # backend deps
+  - run: npx playwright install --with-deps chromium
+
+  - name: Start backend
+    run: |
+      (cd backend && npx tsx server.ts) &
+      echo "$!" > backend.pid
+      for i in $(seq 1 30); do
+        if curl -sf http://localhost:3001/api/health > /dev/null; then
+          echo "Backend ready after $i attempts"
+          exit 0
+        fi
+        sleep 1
+      done
+      echo "Backend failed to start"; exit 1
+
+  - name: Run Playwright tests
+    run: |
+      if find tests -name "*.spec.ts" 2>/dev/null | grep -q .; then
+        npx playwright test
+      else
+        echo "::warning::No Playwright test files found in tests/ — skipping run"
+      fi
+
+  - name: Stop backend
+    if: always()
+    run: |
+      if [ -f backend.pid ]; then
+        kill "$(cat backend.pid)" 2>/dev/null || true
+      fi
+
+  - name: Upload Playwright HTML report
+    if: always()                       # upload even on failure
+    uses: actions/upload-artifact@v4
+    with:
+      name: playwright-report
+      path: Project_04_Test_Plan_Creator_Agent_V2/playwright-report
+      retention-days: 14
+
+  - name: Upload test results (screenshots, videos, traces)
+    if: always()
+    uses: actions/upload-artifact@v4
+    with:
+      name: test-results
+      path: Project_04_Test_Plan_Creator_Agent_V2/test-results
+      retention-days: 14</code></pre>
+
+<blockquote class="warn">
+  <strong>Why your runs currently print a yellow warning:</strong> the <code>find tests -name "*.spec.ts"</code> guard fails because no spec files exist at the project's <code>tests/</code> root yet. To actually run Playwright tests in CI, commit the generated specs (e.g. from <code>tests/generated/Demo/</code>) into a tracked location and adjust the find path if needed.
+</blockquote>
+
+<h2 id="dashboard">5. Layer 2 — The in-app CI/CD dashboard</h2>
+
+<p>The app embeds a dashboard so you can see runs and trigger them without leaving the editor.</p>
+
+<div class="ascii">Frontend (CICDDashboard.tsx)
+    │
+    │  fetch('http://localhost:3001/api/cicd/...')
+    ▼
+Backend (cicd.ts + server.ts endpoints)
+    │
+    │  axios.get/post('https://api.github.com/...',
+    │                  headers: { Authorization: 'Bearer &lt;PAT&gt;' })
+    ▼
+GitHub Actions REST API</div>
+
+<blockquote>
+  <strong>Security note:</strong> The Personal Access Token never reaches the browser. The frontend hits localhost endpoints; the backend holds the token in <code>backend/cicd-config.json</code> and adds the <code>Authorization</code> header on every GitHub call. That's the whole reason <code>cicd.ts</code> exists as a proxy.
+</blockquote>
+
+<h3>The 7 backend endpoints</h3>
+
+<table>
+  <tr>
+    <th>Endpoint</th>
+    <th>What it does</th>
+    <th>GitHub API call</th>
+  </tr>
+  <tr><td><code>GET /api/cicd/config</code></td><td>Return current settings; token is masked</td><td>(none)</td></tr>
+  <tr><td><code>POST /api/cicd/config</code></td><td>Save new settings</td><td>(none)</td></tr>
+  <tr><td><code>POST /api/cicd/test</code></td><td>Verify token works</td><td><code>GET /user</code></td></tr>
+  <tr><td><code>GET /api/cicd/workflow</code></td><td>Get configured workflow's metadata</td><td><code>GET /repos/.../actions/workflows/{file}</code></td></tr>
+  <tr><td><code>GET /api/cicd/workflows</code></td><td>List ALL workflows in the repo</td><td><code>GET /repos/.../actions/workflows</code></td></tr>
+  <tr><td><code>GET /api/cicd/runs?limit=20</code></td><td>Last N runs of the configured workflow</td><td><code>GET /repos/.../actions/workflows/{file}/runs</code></td></tr>
+  <tr><td><code>POST /api/cicd/trigger</code></td><td>Start a manual run</td><td><code>POST /repos/.../actions/workflows/{file}/dispatches</code></td></tr>
+</table>
+
+<h3>The "Trigger Run" sequence</h3>
+
+<ol>
+  <li>Frontend: <code>POST /api/cicd/trigger { ref: "main", reason: "smoke test" }</code></li>
+  <li>Backend's <code>triggerWorkflow()</code> reads config, asserts owner/repo/token are set, calls:<br>
+    <code>POST https://api.github.com/repos/BalajiS108/AI-Testing-All-About/actions/workflows/e2e-tests.yml/dispatches</code><br>
+    body <code>{ ref: "main", inputs: { reason: "smoke test" } }</code>
+  </li>
+  <li>GitHub responds <strong>204 No Content</strong> immediately (accepts the request)</li>
+  <li>GitHub Actions servers asynchronously match the dispatch against the YAML's <code>on: workflow_dispatch</code> block, allocate a runner, begin execution</li>
+  <li>Backend returns to frontend: <code>{ triggeredAt, branch }</code></li>
+  <li>Dashboard polls <code>/api/cicd/runs</code>; the new run appears with status <code>queued → in_progress → completed</code></li>
+</ol>
+
+<h3>Configuration file</h3>
+
+<pre><code>// backend/cicd-config.json
+{
+  "owner": "BalajiS108",
+  "repo": "AI-Testing-All-About",
+  "token": "ghp_xxxxxxxxxxxxx",
+  "workflowFile": "e2e-tests.yml",
+  "defaultBranch": "main"
+}</code></pre>
+
+<p>When the frontend asks for the config, the backend returns everything except the token — replaced with <code>tokenSet: boolean</code>. The token can never be read back out; only overwritten with a new value.</p>
+
+<h2 id="local">6. Layer 3 — The local CI mirror</h2>
+
+<p><code>run-ci-locally.sh</code> replays the workflow stages on your machine without a GitHub round-trip. Useful as a pre-flight check before pushing.</p>
+
+<pre><code>npm run ci:local
+# or directly:
+bash run-ci-locally.sh --skip-install   # faster on re-runs
+bash run-ci-locally.sh --skip-e2e       # typecheck + build only</code></pre>
+
+<h3>Stages (mirror the YAML)</h3>
+
+<ol>
+  <li><code>npm ci</code> (frontend)</li>
+  <li><code>cd backend && npm ci</code></li>
+  <li><code>npx tsc --noEmit</code> (frontend)</li>
+  <li><code>cd backend && npx tsc --noEmit</code></li>
+  <li><code>npm run build</code> → <code>dist/</code></li>
+  <li><code>npx playwright install chromium</code></li>
+  <li>Start backend in background; poll <code>/api/health</code> for 30s</li>
+  <li><code>find tests/ -name "*.spec.ts"</code> → <code>npx playwright test</code> (or warn)</li>
+  <li>Kill backend</li>
+</ol>
+
+<blockquote>
+  <strong>Rule of thumb:</strong> if <code>npm run ci:local</code> passes, your push will pass CI (modulo environment differences). It's the cheapest way to avoid "works on my machine, fails on CI" surprises.
+</blockquote>
+
+<h2 id="flow">7. End-to-end: a code change's journey</h2>
+
+<div class="ascii">You edit a file
+    │
+    ▼
+git add → git commit → git push origin main
+    │
+    ▼
+GitHub matches your push against e2e-tests.yml's `on:` triggers
+    │
+    │ Path filter: files inside Project_04_Test_Plan_Creator_Agent_V2/?
+    │     no  →  silently skipped, no run created
+    │     yes →
+    ▼
+Concurrency: cancel any older e2e-main run
+    │
+    ▼
+GitHub allocates a Linux runner, runs typecheck
+    │     fail  →  build + e2e don't run; red X on the commit
+    │     pass  →
+    ▼
+build  AND  e2e  start in parallel
+    │
+    │  build: npm ci → tsc -b → vite build → upload dist/
+    │
+    │  e2e:   npm ci × 2 → playwright install → start backend (poll health) →
+    │         run tests OR yellow warn (no specs) → stop backend →
+    │         upload report + test-results
+    ▼
+Run shows on github.com Actions tab AND in your in-app dashboard
+    │
+    ▼
+Green check or red X next to the commit on GitHub</div>
+
+<h3>Manual trigger flow (from the in-app dashboard)</h3>
+
+<div class="ascii">You click "Trigger Run" in CICDDashboard
+    │
+    ▼
+POST /api/cicd/trigger
+    │
+    ▼
+backend/cicd.ts → POST https://api.github.com/.../dispatches
+    │
+    ▼
+GitHub 204 immediately, then asynchronously runs the workflow
+    │
+    ▼
+~5–15s later, run appears at /api/cicd/runs → dashboard refreshes</div>
+
+<h2 id="troubleshoot">8. Troubleshooting cheat sheet</h2>
+
+<table>
+  <tr><th>Symptom</th><th>Most likely cause</th><th>Where to look</th></tr>
+  <tr><td>Dashboard shows empty runs list</td><td>No runs yet OR wrong workflow filename in config</td><td><code>backend/cicd-config.json</code></td></tr>
+  <tr><td>"Trigger Run" returns 422</td><td>Workflow YAML missing <code>workflow_dispatch:</code> in its <code>on:</code></td><td><code>.github/workflows/e2e-tests.yml</code> on GitHub</td></tr>
+  <tr><td>"Trigger Run" returns 404</td><td>Wrong owner/repo, OR token can't see the repo</td><td>Click "Test Connection" first; check PAT scopes</td></tr>
+  <tr><td>"Trigger Run" returns 403</td><td>Token missing <code>actions:write</code> permission</td><td>Regenerate PAT with the right scope</td></tr>
+  <tr><td>Run is red but you can't see why</td><td>Click the run row → opens GitHub's log viewer</td><td>The <code>htmlUrl</code> field on each RunSummary</td></tr>
+  <tr><td>Local works, CI fails</td><td>Usually env differences: missing playwright system deps, no display</td><td><code>--with-deps</code> flag in playwright install is the usual fix</td></tr>
+  <tr><td>CI is too slow</td><td><code>cache: 'npm'</code> may not be hitting</td><td>Check run logs for "Cache hit" vs "Cache miss" lines</td></tr>
+  <tr><td>Push didn't trigger CI</td><td>Path filter excluded your changes</td><td>Confirm at least one changed file is under <code>Project_04_Test_Plan_Creator_Agent_V2/</code></td></tr>
+</table>
+
+<div class="footer">
+  Generated for Project_04_Test_Plan_Creator_Agent_V2 · GitHub Actions workflow on BalajiS108/AI-Testing-All-About<br>
+  Print this page (Ctrl+P → Save as PDF) to keep an offline copy.
+</div>
+
+</body>
+</html>
