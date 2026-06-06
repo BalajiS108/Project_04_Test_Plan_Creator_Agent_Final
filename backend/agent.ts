@@ -27,6 +27,11 @@ export interface TestCaseResult {
     error?: string;
     videoFile?: string; // filename of the recorded video
     testData?: string;
+    // Set by the auto-heal pass when a re-run succeeded (true) or when the
+    // healer's PASS verdict was rejected by the coverage integrity check
+    // (healingFailed=true). The frontend renders these as badges.
+    healed?: boolean;
+    healingFailed?: boolean;
 }
 
 export interface ExecutionReport {
@@ -238,8 +243,19 @@ export async function runAgent(
     //   MAX_HEAL_TURNS=2    (default 3)  — auto-heal retries on failure
     //   TOOL_RESULT_CHARS=1500 (default 2000) — cap before appending to LLM history
     // Smaller numbers = faster + cheaper, larger = more headroom for complex tests.
-    const MAX_AGENT_TURNS = Number(process.env.MAX_AGENT_TURNS) || 12;
-    const MAX_HEAL_TURNS = Number(process.env.MAX_HEAL_TURNS) || 3;
+    // Bumped from 12 → 20 → 30 because multi-step e2e flows (login → add to
+    // cart → cart → checkout) need real headroom. With the new mandatory
+    // "discover clickables before clicking" rule, every step that involves
+    // a non-form button costs ~2 turns (discovery + click + maybe verify).
+    // A 15-step SauceDemo flow can legitimately need 30+ turns. Override
+    // via env var to tighten/loosen.
+    const MAX_AGENT_TURNS = Number(process.env.MAX_AGENT_TURNS) || 30;
+    // Bumped from 3 → 8. The healer is asked to "re-execute ALL steps from
+    // scratch" — 3 turns made that impossible for any non-trivial test plan
+    // (after the first heal call there was no time left for actions), which
+    // is why every heal run looked like "show healing message, immediately
+    // fail". 8 still keeps healing bounded so it doesn't burn forever.
+    const MAX_HEAL_TURNS = Number(process.env.MAX_HEAL_TURNS) || 8;
     const TOOL_RESULT_CHARS = Number(process.env.TOOL_RESULT_CHARS) || 2000;
 
     /**
@@ -798,8 +814,28 @@ export async function runAgent(
     const results: TestCaseResult[] = [];
     let lastKnownUrl: string | null = null;
 
+    // Strip a redundant "Step N." / "Step N:" prefix from a step's text.
+    // Test plans authored by humans (or earlier LLMs) often number each
+    // step inside its own text, so a 14-step plan reads:
+    //    14. Step 13. Click the Checkout button.
+    // The agent sees two adjacent numbers and frequently picks the wrong
+    // one for playwright_mark_step (it grabbed 13, but the integrity check
+    // expects 14 = the position). Strip the embedded prefix so the LLM
+    // only ever sees ONE number — the position we control.
+    const stripEmbeddedStepPrefix = (s: string): string => {
+        if (!s) return s;
+        return s.replace(/^\s*step\s+\d+\s*[:.\-)]\s*/i, '').trimStart();
+    };
+
     for (let i = 0; i < testCases.length; i++) {
         const tc = testCases[i];
+        // Normalize every step's text once per test case. Downstream code
+        // (prompt formatting, step display, coaching messages, integrity
+        // check) all read from tc.steps; doing this in-place is cheaper
+        // than threading a derived array through every call site.
+        if (Array.isArray(tc.steps)) {
+            tc.steps = tc.steps.map((s: any) => typeof s === 'string' ? stripEmbeddedStepPrefix(s) : s);
+        }
         const tcStart = Date.now();
         console.log(`\n${'='.repeat(80)}`);
         console.log(`▶ TEST CASE [${i + 1}/${testCases.length}]: TC-${tc.id}: ${tc.name} (${tc.jiraKey})`);
@@ -1030,23 +1066,114 @@ export async function runAgent(
 7. If the test includes Sign Up, after navigation and page inspection click the Sign Up button, link, or URL first before continuing.`
                 : "";
 
+            // ── Site-specific selector cheatsheets ────────────────────────────
+            // For known stable demo sites, inject the exact selectors. This
+            // turns "guess the Add to cart button" from an LLM riddle into a
+            // copy-from-the-list operation. Add new sites here as needed —
+            // criteria: site DOM is stable and we've eaten enough false-pass
+            // cycles on it that it's worth hardcoding.
+            const tcText = `${tc.name} ${tc.expectedResult || ''} ${(tc.steps || []).join(' ')} ${tc.testData || ''} ${urlFromPreconditions || ''}`.toLowerCase();
+            let siteCheatsheet = '';
+            if (/saucedemo\.com/.test(tcText)) {
+                siteCheatsheet = `
+## SITE CHEATSHEET — saucedemo.com (DOM is stable; USE THESE VERBATIM)
+
+Login page (/):
+- Username input:      #user-name
+- Password input:      #password
+- Login button:        #login-button
+- Accepted users:      standard_user, problem_user, performance_glitch_user, error_user, visual_user
+- Password (all):      secret_sauce
+- Error banner:        [data-test="error"]  (only appears after a failed login submit)
+
+Inventory page (/inventory.html — appears after a successful login):
+- Cart icon (top-right):       #shopping_cart_container  (link, NOT a button)
+- Cart badge with count:       .shopping_cart_badge      (only present when cart is non-empty)
+- Add-to-cart button pattern:  #add-to-cart-<product-name-lowercased-with-hyphens>
+    examples: #add-to-cart-sauce-labs-backpack, #add-to-cart-sauce-labs-bolt-t-shirt,
+              #add-to-cart-sauce-labs-bike-light, #add-to-cart-sauce-labs-fleece-jacket,
+              #add-to-cart-sauce-labs-onesie, #add-to-cart-test.allthethings()-t-shirt-(red)
+- After click, the button is REPLACED by a Remove button with id pattern:
+    #remove-<product-name-lowercased-with-hyphens>
+  (the original #add-to-cart-… selector no longer exists in the DOM — don't re-target it)
+- Product titles use:          .inventory_item_name      (multi-match — use .filter({hasText:'...'}) if asserting)
+
+Cart page (/cart.html — after clicking #shopping_cart_container):
+- Each line item:              .cart_item                (MULTI-MATCH — use .first() or .filter({hasText:'...'}))
+- Item names in cart:          [data-test="inventory-item-name"]  (preferred over .cart_item .inventory_item_name)
+- Continue Shopping button:    #continue-shopping
+- Checkout button:             #checkout
+
+Checkout step one (/checkout-step-one.html):
+- First name input:            #first-name
+- Last name input:             #last-name
+- ZIP code input:              #postal-code
+- Continue button:             #continue
+- Cancel button:               #cancel
+
+Checkout step two (/checkout-step-two.html):
+- Finish button:               #finish
+- Cancel button:               #cancel
+
+Checkout complete (/checkout-complete.html):
+- Success banner text:         "Thank you for your order!" (use playwright_get_visible_text to verify)
+- Back home button:            #back-to-products
+
+If the test plan refers to "Add to cart" for a specific product, ALWAYS use the per-product #add-to-cart-… id. Generic getByText('Add to cart') will match every product on the inventory page and fail strict mode.
+`;
+            }
+
             const systemPrompt = `You are a QA test automation expert executing browser tests with Playwright tools.
 
 ## MANDATORY EXECUTION PROTOCOL (Follow in exact order)
 
 ### STEP 1 - ALIGN WITH TEST STEPS
-You MUST call playwright_mark_step(stepIndex=X, stepDescription="<exact text from Test Steps>") at the beginning of each logical test step. 
+You MUST call playwright_mark_step(stepIndex=X, stepDescription="<exact text from Test Steps>") at the beginning of each logical test step.
 Do NOT call playwright_mark_step for every individual action. Only call it when you transition to a new step defined in the "Test Steps" list.
 For example, if Test Step 1 is "Login to Application", call playwright_mark_step(1, "Login to Application") and then perform the navigation, filling, and clicking needed to log in.
+
+EVERY STEP MUST BE EXECUTED. If the Test Steps list has 5 steps, you must call playwright_mark_step for steps 1, 2, 3, 4 AND 5 and perform the required browser actions for each. Skipping a step and then declaring PASS is treated as a FAIL by the post-execution integrity check — the system will detect missing mark_step calls and override your verdict to FAIL with a list of skipped steps. There is no shortcut: each step must be reached, marked, and its actions executed before you may return PASS.
+
+If you encounter a blocker mid-flow (an element won't appear, navigation fails, an unexpected page state) DO NOT bail out and declare PASS — return FAIL with a clear actualResult describing where you got stuck and which step you couldn't complete.
 
 ### STEP 2 - NAVIGATE
 Always navigate to the URL provided in the preconditions first.
 
 ### STEP 3 - DISCOVER & EXECUTE
 For each action within a step:
-1. Call playwright_get_input_fields to see what's on the page.
-2. Perform actions (fill, click, etc.).
-3. IMPORTANT: If an action (like a click) doesn't seem to navigate or change the page, check for validation tooltips on ALL input fields using:
+1. **Before filling forms:** call playwright_get_input_fields to see input selectors.
+2. **Before clicking ANY button or link that isn't a form-submit (e.g. "Add to cart", "Open Cart", a product tile, a "Next" link):** you MUST call playwright_evaluate to enumerate the clickable elements with their actual ids/data-test/text. Use exactly this script (it filters to visible/clickable items and returns at most 60):
+
+\`\`\`
+playwright_evaluate(script: \`
+JSON.stringify(
+  Array.from(document.querySelectorAll('button, a, input[type="submit"], input[type="button"], [role="button"]'))
+    .filter(el => {
+      const r = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    })
+    .map(el => ({
+      tag: el.tagName.toLowerCase(),
+      text: (el.textContent || el.value || el.getAttribute('aria-label') || '').trim().slice(0, 80),
+      id: el.id || null,
+      dataTest: el.getAttribute('data-test') || el.getAttribute('data-testid') || null,
+      name: el.getAttribute('name') || null,
+      href: el.getAttribute('href') || null
+    }))
+    .slice(0, 60),
+  null, 2
+)
+\`)
+\`\`\`
+
+3. Pick the EXACT id or data-test value the script returned. Do NOT guess. Do NOT invent. If the test plan says "Add Sauce Labs Bolt T-Shirt to cart" and the script returns \`{id: "add-to-cart-sauce-labs-bolt-t-shirt", text: "Add to cart"}\`, click \`#add-to-cart-sauce-labs-bolt-t-shirt\` — not \`text=Add to cart\` (which would match every product).
+
+4. **If your click did nothing** (page didn't change, no element appeared) and you've not yet diagnosed why, immediately call the enumeration script above on the CURRENT page state. The selector you used may no longer exist (page navigated) or may have been ambiguous.
+
+5. **NEVER call the same playwright_click selector more than twice in a row.** If the second attempt doesn't change the page, the selector is wrong — re-enumerate (step 2) instead of trying a third time. Repeated identical clicks waste your turn budget and the system will detect this as a stuck loop.
+
+6. IMPORTANT: If an action (like a click) doesn't seem to navigate or change the page, check for validation tooltips on ALL input fields using:
    playwright_evaluate(script="Array.from(document.querySelectorAll('input, select, textarea')).map(el => el.validationMessage).filter(m => m !== '').join(', ')")
 
 ### STEP 3 - SELECTOR PRIORITY (most reliable → least)
@@ -1076,14 +1203,35 @@ After each action, verify the outcome.
    - If the test step was trying to progress (e.g., "Login to app"), and you see a missing field error, try to fill that field even if not explicitly in the step text, to "heal" the path.
 2. IMPORTANT: If an action fails, check for browser validation tooltips (e.g., "Please fill out this field") using playwright_evaluate(script="document.activeElement.validationMessage").
 
-### STEP 7 - RETURN VERDICT
-When ALL steps are done, return ONLY this JSON on the last line:
-{"verdict": "PASS", "actualResult": "Describe what happened"}
+### STEP 7 - VERIFY EXPECTED RESULT (MANDATORY before PASS)
+"All my clicks worked" is NOT a pass. Before returning PASS you MUST collect concrete evidence that the *Expected Result* actually occurred. Skipping this step and returning PASS based only on click success is the #1 cause of bogus passes.
+
+Required verification calls (run AT LEAST ONE that fits the Expected Result):
+- playwright_get_visible_text() → check that the expected text/heading/error message is present (or absent, for negative cases)
+- playwright_evaluate(script="location.href") → check the URL changed (positive flow) or did NOT change (negative flow)
+- playwright_evaluate(script="document.querySelector('<expected-selector>')?.textContent") → check a specific element rendered
+
+NEGATIVE-OUTCOME tests (Expected Result = "user stays on X", "login fails", "error appears", "validation prevents submit", "form not submitted", etc.):
+- You MUST positively verify the negative state. A missing navigation alone is NOT evidence — the page might still be loading.
+- For blank/invalid login: verify the URL is still the login page AND an error message is present (or the inputs are still focused with validation tooltips). Get the error text with playwright_get_visible_text() or playwright_evaluate.
+- If you cannot find any error indicator and the URL didn't change, that's still evidence — but say so in actualResult ("No error message rendered; URL unchanged from /login").
+- If the URL DID change to a logged-in destination (e.g. /inventory) when the test expected blockage, that is a FAIL.
+
+POSITIVE-OUTCOME tests (Expected Result = "user lands on X", "item appears", "success message shown"):
+- Verify the new page/element is actually visible. Don't infer success from "click didn't throw".
+
+### STEP 8 - RETURN VERDICT
+Return ONLY this JSON on the last line.
+- PASS is only valid when STEP 7 produced concrete evidence that matches the Expected Result. Quote that evidence in actualResult.
+- FAIL when the evidence shows the Expected Result did NOT occur (or could not be verified).
+
+{"verdict": "PASS", "actualResult": "Verified: <quote the evidence — visible text, URL, element state>"}
 or
-{"verdict": "FAIL", "actualResult": "Describe what failed and why"}
+{"verdict": "FAIL", "actualResult": "Expected <X> but observed <Y>. Evidence: <quote>"}
 
 ## AVAILABLE TOOLS
-${toolDocs}`;
+${toolDocs}
+${siteCheatsheet}`;
 
             const userPrompt = `TEST: ${tc.name}
 
@@ -1091,19 +1239,23 @@ URL: ${urlFromPreconditions || 'ERROR: No URL provided!'}
 
 Test Data: ${tc.testData || `Email=${uniqueEmail}`}
 
-Test Steps:
-${tc.steps.map((s: string, i: number) => `${i + 1}. ${s}`).join('\n')}
+Test Steps (use the number before "of" as the stepIndex when calling playwright_mark_step — DO NOT use any number inside the step text):
+${tc.steps.map((s: string, i: number) => `Step ${i + 1} of ${tc.steps.length}: ${s}`).join('\n')}
 
 Expected Result: ${tc.expectedResult}
 
 EXECUTION WORKFLOW:
 1. Call ${navigateTool}(url="${urlFromPreconditions || ''}") → navigate to the page
-2. Call playwright_get_input_fields() → discover all input selectors on the page  
+2. Call playwright_get_input_fields() → discover all input selectors on the page
 3. Call playwright_fill(selector=<discovered_selector>, value=<test_data_value>) → fill each input
 4. Call playwright_click(selector=<discovered_selector>) → click buttons/links
-5. Call playwright_get_visible_text() → verify the result
+5. Call playwright_get_visible_text() → CAPTURE EVIDENCE of the outcome (required before PASS)
 6. Repeat steps 3-5 for each test step until ALL steps are complete
-7. Return final verdict JSON: {"verdict": "PASS" or "FAIL", "actualResult": "<description>"}
+7. FINAL VERIFICATION — before returning a verdict, prove the Expected Result actually occurred:
+   - Re-read the Expected Result above.
+   - If it says "user stays on X / login fails / error message shown / submit blocked" → call playwright_get_visible_text() to confirm the error/state, and playwright_evaluate(script="location.href") to confirm the URL did NOT advance. PASS only if you find evidence of the blockage. NEVER return PASS just because your clicks succeeded — that's the most common bogus pass for negative tests.
+   - If it says "user lands on / success / X is displayed" → confirm via playwright_get_visible_text() that the expected text/element is actually visible AND the URL advanced.
+8. Return final verdict JSON: {"verdict": "PASS"|"FAIL", "actualResult": "Verified: <quote the evidence>"}
 
 CRITICAL RULES:
 - You MUST call playwright_get_input_fields right after navigation to discover the actual selectors before filling anything.
@@ -1127,6 +1279,14 @@ CRITICAL RULES:
             // first turn instead of calling a browser tool. Without this, the
             // test fails immediately with "No browser actions were performed."
             let noToolRetryAttempted = false;
+
+            // Stuck-detection: if no NEW mark_step call has been observed for
+            // 3 consecutive turns (and the agent isn't returning a verdict),
+            // force-inject a coaching message identifying the next unmarked
+            // step. Catches the common "agent spins on get_visible_text /
+            // click loops without progressing through the step list" pattern.
+            let lastMarkStepCount = 0;
+            let turnsWithoutNewMarkStep = 0;
 
             // UI actions are what users care about: navigate, click, fill, type, press, select
             // Utility actions are MCP infrastructure: get_input_fields, get_visible_text, screenshot, wait
@@ -1316,9 +1476,44 @@ CRITICAL RULES:
                         break;
                     }
 
-                    // If verdict is found, stop immediately
+                    // If verdict is found, stop immediately — UNLESS it's a
+                    // premature PASS that skipped steps. In that case we
+                    // push back instead of accepting, giving the agent a
+                    // chance to actually finish the test rather than letting
+                    // the post-execution integrity check force a FAIL.
                     if (isVerdict && toolCallsExecuted) {
-                        console.log(`  ✅ Verdict detected in response: ${finalContent.match(/(PASS|FAIL)/i)?.[0] || 'unknown'}`);
+                        const verdictText = finalContent.match(/"?verdict"?\s*[:=]\s*"?(PASS|FAIL)"?/i)?.[1]?.toUpperCase();
+                        const markedStepNumbers = new Set(
+                            uiActionLog
+                                .filter(a => a.tool === 'playwright_mark_step' && typeof a.args?.stepIndex === 'number')
+                                .map(a => a.args.stepIndex as number)
+                        );
+                        const expectedSteps = (tc.steps || []).length;
+                        const unmarkedSteps: { idx: number; text: string }[] = [];
+                        for (let s = 1; s <= expectedSteps; s++) {
+                            if (!markedStepNumbers.has(s)) unmarkedSteps.push({ idx: s, text: tc.steps[s - 1] });
+                        }
+                        // Only intervene on PASS that skipped steps. FAIL
+                        // verdicts mid-flow are legitimate (agent hit a
+                        // blocker and is being honest). Same for PASS that
+                        // covered everything.
+                        if (verdictText === 'PASS' && unmarkedSteps.length > 0 && unmarkedSteps.length < expectedSteps) {
+                            const skippedList = unmarkedSteps
+                                .map(u => `Step ${u.idx} ("${u.text}")`)
+                                .slice(0, 4)
+                                .join('; ');
+                            const more = unmarkedSteps.length > 4 ? ` and ${unmarkedSteps.length - 4} more` : '';
+                            console.warn(`  🚫 Rejecting premature PASS verdict: ${unmarkedSteps.length}/${expectedSteps} step(s) unmarked. Coaching the agent to finish.`);
+                            messages.push({
+                                role: 'user',
+                                content: `Your PASS verdict was REJECTED. You declared PASS but ${unmarkedSteps.length} of ${expectedSteps} steps were never executed: ${skippedList}${more}.\n\nDo NOT return a verdict yet. Resume execution from Step ${unmarkedSteps[0].idx} ("${unmarkedSteps[0].text}"): call playwright_mark_step(${unmarkedSteps[0].idx}, ...), perform its required browser actions, then continue through the remaining steps in order. Only after every step (1..${expectedSteps}) has been marked AND its action(s) executed may you re-evaluate and return a verdict.`,
+                            });
+                            // Reset finalContent so the verdict-parser on the
+                            // next turn doesn't keep matching the rejected one.
+                            finalContent = '';
+                            continue;
+                        }
+                        console.log(`  ✅ Verdict detected in response: ${verdictText || 'unknown'}`);
                         testCompletionDetected = true;
                         break;
                     }
@@ -1333,13 +1528,59 @@ CRITICAL RULES:
                         break;
                     }
 
-                    // Partial execution - ask agent to continue
+                    // Track mark_step progress for stuck-detection. If this
+                    // turn produced a new mark_step call, reset the counter;
+                    // otherwise increment. Three consecutive turns without a
+                    // new mark_step => the agent is spinning, force-coach.
+                    const currentMarkStepCount = uiActionLog.filter(a => a.tool === 'playwright_mark_step').length;
+                    if (currentMarkStepCount > lastMarkStepCount) {
+                        lastMarkStepCount = currentMarkStepCount;
+                        turnsWithoutNewMarkStep = 0;
+                    } else {
+                        turnsWithoutNewMarkStep += 1;
+                    }
+
+                    // Partial execution - ask agent to continue. Name the
+                    // specific next-unreached step (computed from mark_step
+                    // calls so far) so the LLM doesn't just call mark_step
+                    // generically without progressing.
                     if (toolCallsExecuted && !isVerdict && totalActionsExecuted > 0) {
-                        console.log(`⚠️ Test in progress. ${totalActionsExecuted} actions executed but no verdict yet. Prompting to continue...`);
-                        messages.push({
-                            role: "assistant",
-                            content: `CONTINUE: You have executed ${totalActionsExecuted} browser actions so far. Keep executing remaining test steps. When ALL steps are done, return your final verdict in JSON format: {"verdict": "PASS", "actualResult": "..."}`
-                        });
+                        const markedStepNumbers = new Set(
+                            uiActionLog
+                                .filter(a => a.tool === 'playwright_mark_step' && typeof a.args?.stepIndex === 'number')
+                                .map(a => a.args.stepIndex as number)
+                        );
+                        const totalSteps = (tc.steps || []).length;
+                        const nextUnmarked: { idx: number; text: string } | null = (() => {
+                            for (let s = 1; s <= totalSteps; s++) {
+                                if (!markedStepNumbers.has(s)) {
+                                    return { idx: s, text: tc.steps[s - 1] };
+                                }
+                            }
+                            return null;
+                        })();
+
+                        // Escalation when the agent hasn't called a new
+                        // mark_step in 3 turns despite still firing tools —
+                        // it's spinning on discovery/utility calls instead
+                        // of progressing. Use a stricter prompt that tells
+                        // it to STOP doing anything else first.
+                        const stuckOnSameStep = turnsWithoutNewMarkStep >= 3 && nextUnmarked !== null;
+                        const coaching = nextUnmarked
+                            ? (stuckOnSameStep
+                                ? `STOP. You have spent ${turnsWithoutNewMarkStep + 1} turns without advancing past Step ${nextUnmarked.idx} of ${totalSteps} ("${nextUnmarked.text}"). You are stuck.\n\nDo EXACTLY this on your next response, nothing else:\n1. Call playwright_mark_step(stepIndex=${nextUnmarked.idx}, stepDescription="${nextUnmarked.text}").\n2. Use playwright_evaluate to enumerate visible buttons/links if you need a selector (one short script — see the system prompt's STEP 3).\n3. Click the EXACT id/data-test the script returns to do this step.\nDo NOT call get_visible_text again. Do NOT re-list inputs. Do NOT explain. Just mark the step and act on it.\nIf you genuinely cannot perform this step, return {"verdict": "FAIL", "actualResult": "Could not complete Step ${nextUnmarked.idx}: <one-line reason>"} — that's better than spinning silently.`
+                                : `CONTINUE: You have executed ${totalActionsExecuted} browser actions, but Step ${nextUnmarked.idx} of ${totalSteps} ("${nextUnmarked.text}") has NOT been started yet — you have not called playwright_mark_step(${nextUnmarked.idx}, ...) for it.\n\nDo this right now:\n1. Call playwright_mark_step(${nextUnmarked.idx}, "${nextUnmarked.text}").\n2. Perform the browser action(s) that satisfy that step.\n3. Continue to the remaining steps in order.\n\nDo NOT return a verdict until every step (1..${totalSteps}) has been marked AND its required action(s) executed. The system will detect skipped steps and override your PASS verdict to FAIL.`)
+                            : `CONTINUE: You have executed ${totalActionsExecuted} browser actions and marked every step. If all steps are truly complete, run STEP 7 (verify the Expected Result with playwright_get_visible_text / playwright_evaluate) and then return the verdict JSON.`;
+                        if (stuckOnSameStep) {
+                            console.warn(`  🥶 Stuck-detection: ${turnsWithoutNewMarkStep + 1} turns without a new mark_step. Pushing strict coaching toward step ${nextUnmarked!.idx}/${totalSteps}.`);
+                            // Reset the counter so we don't fire the strict
+                            // message every turn — give the agent a chance
+                            // to respond to it.
+                            turnsWithoutNewMarkStep = 0;
+                        } else {
+                            console.log(`⚠️ Test in progress. ${totalActionsExecuted} actions executed but no verdict yet. ${nextUnmarked ? `Coaching toward step ${nextUnmarked.idx}/${totalSteps}.` : 'All steps marked — prompting for verification.'}`);
+                        }
+                        messages.push({ role: "user", content: coaching });
                         continue;
                     }
 
@@ -1451,6 +1692,41 @@ CRITICAL RULES:
                     console.log(`     Expected params: ${expectedParams.join(", ") || "none"}`);
                     console.log(`     Required: [${required.join(", ") || "none"}]`);
 
+                    // ── Repeat-call stuck detector ────────────────────────────
+                    // If the LLM has called the same click tool with the same
+                    // selector 2+ times in the recent history, refuse to fire
+                    // it again and force a discovery step instead. This breaks
+                    // the most common stuck-loop pattern (LLM keeps clicking a
+                    // selector that doesn't exist, page never changes, agent
+                    // wastes its turn budget). Only applies to click-family
+                    // tools — fills/types are typically idempotent.
+                    if (/click/i.test(calledToolName) && args?.selector) {
+                        const sel = String(args.selector);
+                        // Look at last 4 UI actions of the same tool+selector
+                        const recent = uiActionLog.slice(-8).filter(
+                            (a) => a.tool === calledToolName && a.args?.selector === sel,
+                        );
+                        if (recent.length >= 2) {
+                            console.warn(`  🔁 Stuck-loop detected: ${calledToolName}('${sel}') called ${recent.length + 1}x. Forcing discovery instead.`);
+                            const diag = [
+                                `STUCK-LOOP DETECTED — you've already tried ${calledToolName}('${sel}') ${recent.length} time(s) in this test case and the page state has not changed in the way you expected.`,
+                                ``,
+                                `Refusing to re-fire the same click. Do NOT retry the same selector. Instead, IMMEDIATELY call playwright_evaluate with this exact script to see what's actually on the page right now:`,
+                                ``,
+                                `playwright_evaluate(script: \`JSON.stringify(Array.from(document.querySelectorAll('button, a, input[type="submit"], input[type="button"], [role="button"]')).filter(el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; }).map(el => ({tag: el.tagName.toLowerCase(), text: (el.textContent || el.value || el.getAttribute('aria-label') || '').trim().slice(0, 80), id: el.id || null, dataTest: el.getAttribute('data-test') || el.getAttribute('data-testid') || null, href: el.getAttribute('href') || null})).slice(0, 60), null, 2)\`)`,
+                                ``,
+                                `Then pick the EXACT id/data-test from that list. The selector "${sel}" is wrong — either the element doesn't exist, it was renamed, or the page has navigated away from where you started.`,
+                            ].join('\n');
+                            messages.push({ role: 'tool', tool_call_id: toolCall.id, content: diag });
+                            // Count this as an attempted UI action so the step
+                            // gets credited, but mark it failed so the user
+                            // sees the stuck-loop in the report.
+                            uiActionLog.push({ tool: calledToolName, args, success: false, message: `${calledToolName}('${sel}') — stuck-loop, refused after ${recent.length} retries` });
+                            uiActionsFailed = true;
+                            continue;
+                        }
+                    }
+
                     if (client) {
                         try {
                             let toolText;
@@ -1540,8 +1816,15 @@ CRITICAL RULES:
             // Skip this entire block when the test was stop-interrupted —
             // we already set verdict='SKIPPED' above and don't want it
             // demoted to FAIL just because the action log looks incomplete.
+            //
+            // For counting purposes, exclude `playwright_mark_step` — that's
+            // a pseudo-tool the agent uses to label which step it's on, not
+            // a real browser action. Counting it inflated the "All N UI
+            // actions completed" message (e.g. claimed 8 when only 6
+            // actually touched the page).
+            const realUiActions = uiActionLog.filter(a => a.tool !== 'playwright_mark_step');
             if (!stoppedDuringThisCase) {
-                const uiActionsRan = uiActionLog.length > 0;
+                const uiActionsRan = realUiActions.length > 0;
                 const allUiActionsSucceeded = uiActionsRan && !uiActionsFailed;
 
                 if (!toolCallsExecuted) {
@@ -1553,7 +1836,7 @@ CRITICAL RULES:
                     // LLM didn't emit a verdict — infer from UI action results
                     verdict = allUiActionsSucceeded ? "PASS" : "FAIL";
                     actualResult = allUiActionsSucceeded
-                        ? `All ${uiActionLog.length} UI actions completed successfully.`
+                        ? `All ${realUiActions.length} browser action${realUiActions.length === 1 ? '' : 's'} completed without runtime errors. (Note: this does NOT imply the test's expected outcome was verified — only that no Playwright tool call threw.)`
                         : `Some UI actions failed. Check step details.`;
                 } else if (verdict === "PASS" && uiActionsFailed) {
                     // LLM said PASS but a UI action actually failed — trust actions
@@ -1565,7 +1848,7 @@ CRITICAL RULES:
 
             if (!actualResult) {
                 actualResult = verdict === "PASS"
-                    ? `All ${uiActionLog.length} UI steps completed successfully.`
+                    ? `All ${realUiActions.length} browser action${realUiActions.length === 1 ? '' : 's'} completed without runtime errors.`
                     : finalContent.slice(0, 300);
             }
 
@@ -1613,28 +1896,38 @@ CRITICAL RULES:
             tc.steps.forEach((stepText: string, idx: number) => {
                 const stepNum = idx + 1;
                 
-                // Heuristic 1: Look for explicit markers from playwright_mark_step
-                const stepActions = uiActionLog.filter(a => 
-                    a.tool === 'playwright_mark_step' && a.args?.stepIndex === stepNum
-                );
-                
-                // Find all actions that happened AFTER this mark_step and BEFORE the next mark_step
+                // Did the agent EVER call playwright_mark_step? If so, we use
+                // mark_step boundaries exclusively (proportional fallback would
+                // steal actions from properly-marked steps and falsely populate
+                // unmarked ones, hiding the fact that the agent skipped them).
+                const anyMarkStepCalled = uiActionLog.some(a => a.tool === 'playwright_mark_step');
+
                 let relevantActions: any[] = [];
                 const currentMarkIdx = uiActionLog.findIndex(a => a.tool === 'playwright_mark_step' && a.args?.stepIndex === stepNum);
                 const nextMarkIdx = uiActionLog.findIndex(a => a.tool === 'playwright_mark_step' && a.args?.stepIndex === stepNum + 1);
-                
-                if (currentMarkIdx !== -1) {
-                    relevantActions = uiActionLog.slice(currentMarkIdx + 1, nextMarkIdx !== -1 ? nextMarkIdx : uiActionLog.length);
-                    // Special case: If this is Step 1, also include any actions that happened BEFORE the first mark
-                    if (stepNum === 1) {
-                        const preActions = uiActionLog.slice(0, currentMarkIdx);
-                        relevantActions = [...preActions, ...relevantActions];
+                let stepWasReached: boolean;
+
+                if (anyMarkStepCalled) {
+                    if (currentMarkIdx !== -1) {
+                        relevantActions = uiActionLog.slice(currentMarkIdx + 1, nextMarkIdx !== -1 ? nextMarkIdx : uiActionLog.length);
+                        // Special case: If this is Step 1, also include any actions that happened BEFORE the first mark
+                        if (stepNum === 1) {
+                            const preActions = uiActionLog.slice(0, currentMarkIdx);
+                            relevantActions = [...preActions, ...relevantActions];
+                        }
+                        stepWasReached = true;
+                    } else {
+                        // mark_step was used but NOT for this step → the agent
+                        // skipped this step. Don't borrow actions from elsewhere.
+                        relevantActions = [];
+                        stepWasReached = false;
                     }
                 } else {
-                    // Fallback to old heuristic if no mark_step was called
+                    // No mark_step at all — fall back to proportional distribution.
                     const startIdx = idx * actionsPerStep;
                     const endIdx = idx === totalSteps - 1 ? uiActionLog.length : (idx + 1) * actionsPerStep;
                     relevantActions = uiActionLog.slice(startIdx, endIdx);
+                    stepWasReached = relevantActions.length > 0;
                 }
 
                 let stepPassed = true;
@@ -1646,16 +1939,34 @@ CRITICAL RULES:
                         .filter(a => a.tool !== 'playwright_mark_step')
                         .map(a => `${a.success ? '✅' : '❌'} ${describeUIAction(a)}`)
                         .join('\n');
-                } else if (verdict === "PASS") {
-                    stepResultDetails = "Step completed successfully";
-                    stepPassed = true;
                 } else if (idx === 0 && !toolCallsExecuted) {
                     stepResultDetails = "No browser actions were performed.";
                     stepPassed = false;
-                } else {
-                    stepResultDetails = "Step not reached or failed during execution";
-                    // At this branch verdict is FAIL/SKIPPED/null (PASS was handled above)
+                } else if (!stepWasReached) {
+                    // Honest reporting: the agent never executed this step.
+                    // Critically, do NOT trust an LLM PASS verdict here —
+                    // PASS that skips steps is the most common bogus pass.
+                    // Marking stepPassed=false also lets the verdict-integrity
+                    // check downstream downgrade the overall test to FAIL.
+                    stepResultDetails = "⚠ Step not reached — the agent skipped this step (no playwright_mark_step call and no actions logged for it).";
                     stepPassed = false;
+                } else {
+                    // stepWasReached === true but the slice between this
+                    // mark_step and the next is empty. That's expected and
+                    // CORRECT for passive/negative-instruction steps like
+                    // "Leave the Username field empty", "Wait for the page
+                    // to load", "Observe that nothing happens" — the agent
+                    // intentionally performed no UI action to satisfy them.
+                    // Treat as passed; just don't oversell it in the message.
+                    const passiveLooking = /\b(leave\s+\w+\s+(?:field\s+)?empty|empty|blank|do\s+not|don'?t|without|wait|observe|verify|confirm)\b/i.test(stepText);
+                    stepResultDetails = passiveLooking
+                        ? "No browser action required for this step (agent acknowledged it; condition is satisfied implicitly — e.g. leave-empty / passive verification)."
+                        : "Step acknowledged by the agent but no browser action was logged. If you expected this step to perform an action, treat this as an agent miss.";
+                    // Passive steps shouldn't drag the test down. Non-passive
+                    // "no action logged" still counts as passed at the per-step
+                    // level — the test verdict logic above decides overall PASS/FAIL
+                    // based on the full action log and LLM verdict.
+                    stepPassed = true;
                 }
 
                 // If the whole test failed and this is the "farthest" reached step, ensure it shows the fail
@@ -1671,13 +1982,36 @@ CRITICAL RULES:
                 });
             });
 
-            // If there are UI actions that didn't fit (cleanup actions etc), add them to the last step or a separate log
-            if (uiActionLog.length > totalSteps * actionsPerStep) {
-                const leftoverActions = uiActionLog.slice(totalSteps * actionsPerStep);
-                const lastStep = stepResults[stepResults.length - 1];
-                if (lastStep) {
-                    lastStep.result += '\n' + leftoverActions.map(a => `${a.success ? '✅' : '❌'} ${describeUIAction(a)}`).join('\n');
-                }
+            // Leftover-actions block removed. It used a proportional bucket
+            // (`actionsPerStep`) that was meaningful only when no mark_step
+            // calls existed — in modern runs the mark_step boundaries already
+            // claim every action that belongs to a step, and any "extra"
+            // actions are usually misnumbered mark_step calls (e.g. the LLM
+            // called mark_step(stepIndex=10) on what we consider step 14
+            // because the step text said "Step 10."). Appending those to
+            // the LAST step's display produced the confusing contradiction
+            // we saw: "Step 14: not reached — agent skipped this step"
+            // followed by two ✅ mark_step rows. The integrity check below
+            // already detects the misnumbering; we don't need to paste the
+            // raw stray actions onto an unrelated step.
+
+            // ─── Verdict integrity check ────────────────────────────────────
+            // If the LLM declared PASS but our step-coverage analysis shows
+            // it skipped one or more steps, the PASS is a lie. The most
+            // common failure mode: agent runs Step 1 (e.g. login), then
+            // fabricates a verdict before doing Step 2..N. Downgrade to FAIL
+            // and surface which steps were skipped, so the user sees the
+            // truth instead of a misleading green checkmark.
+            const unreachedSteps = stepResults.filter(s => /^⚠ Step not reached/i.test(s.result));
+            if (verdict === "PASS" && unreachedSteps.length > 0) {
+                const skippedLabels = unreachedSteps
+                    .map(s => s.step.replace(/^Step \d+:\s*/, ''))
+                    .slice(0, 3)
+                    .join('; ');
+                const more = unreachedSteps.length > 3 ? ` (+${unreachedSteps.length - 3} more)` : '';
+                console.warn(`⚠️ Overriding LLM verdict PASS → FAIL: ${unreachedSteps.length}/${stepResults.length} step(s) were skipped.`);
+                verdict = "FAIL";
+                actualResult = `Agent declared PASS without executing all required steps. ${unreachedSteps.length}/${stepResults.length} step(s) were skipped: ${skippedLabels}${more}. (Original LLM actualResult: ${actualResult || '<none>'})`;
             }
 
             const tcResult = {
@@ -1732,16 +2066,20 @@ CRITICAL RULES:
                         } catch { }
                     }
 
+                    const totalStepsInPlan = (tc.steps || []).length;
+                    const stepsFormatted = (tc.steps || []).map((s: string, i: number) => `Step ${i + 1} of ${totalStepsInPlan}: ${s}`).join('\n');
                     const healPrompt = `The previous test case FAILED. Here are the failure details:
 
 Test Case: ${tc.name}
-Steps: ${tc.steps.join(', ')}
 Expected Result: ${tc.expectedResult}
 Actual Result (failure): ${actualResult}
 Error Details: ${stepResults.filter(s => !s.passed).map(s => s.result).join('\n')}
 
 Current Page Snapshot (Truncated):
 ${pageSnapshot}
+
+Test Steps (use the number before "of" as the stepIndex when calling playwright_mark_step — DO NOT use any number inside the step text):
+${stepsFormatted}
 
 ### HEALING STRATEGIES (Priority Order):
 1. **TEXT SEARCH**: If the CSS selector (id, class) failed, search for elements containing the visible text.
@@ -1750,16 +2088,30 @@ ${pageSnapshot}
 4. **PAGE EXPLORATION**: Call playwright_get_visible_text() again to see current state.
 5. **NAVIGATION RECOVERY**: If on the wrong page, navigate back to the starting URL.
 
-INSTRUCTIONS: Re-execute ALL steps of this test case from scratch. Correct the broken action that caused the previous failure.
+### MANDATORY STRUCTURE (the system will reject your PASS verdict otherwise):
+- You MUST call playwright_mark_step(stepIndex=N, stepDescription="...") at the start of EVERY step, where N is the position number shown above.
+- Every step (1 through ${totalStepsInPlan}) must be marked. The post-heal integrity check counts mark_step calls — if any step is missing one, your PASS will be downgraded to FAIL with a list of the skipped steps.
+- For "discover before clicking" non-form buttons (e.g. Add to Cart, Cart icon, Checkout), use playwright_evaluate to enumerate visible buttons/links by id+data-test+text, then click the EXACT id/data-test from the result. Don't guess.
+
+INSTRUCTIONS: Re-execute ALL ${totalStepsInPlan} steps of this test case from scratch. Correct the broken action that caused the previous failure. Mark every step. Only after every step (1..${totalStepsInPlan}) has been marked AND its required browser action(s) executed may you return a verdict.
 After completing all steps, you MUST output this JSON on the last line: {"verdict": "PASS" or "FAIL", "actualResult": "description of healing success/failure"}`;
 
                     const healMessages: any[] = [
-                        { role: 'system', content: 'You are a test automation healing agent. Re-execute the failed test with corrected selectors and actions.' },
+                        { role: 'system', content: `You are a test automation healing agent. Re-execute the failed test with corrected selectors and actions.\n\nCRITICAL: Call playwright_mark_step(stepIndex=N, stepDescription="...") at the START of every step. The system rejects healing verdicts that don't cover all steps via mark_step calls.${siteCheatsheet}` },
                         { role: 'user', content: healPrompt }
                     ];
 
                     let healVerdict: 'PASS' | 'FAIL' = 'FAIL';
                     let healActualResult = '';
+
+                    // Track every UI action the healer takes, so we can rebuild
+                    // stepResults from the heal run (not the original failed run)
+                    // AND apply the same step-coverage integrity check we use for
+                    // the main pass. Without this, the healer could re-declare
+                    // PASS while skipping the same steps the original run did,
+                    // and the UI would show the contradictory "PASS but step X
+                    // not reached" we saw on the AddMultipleProductsPositive test.
+                    const healUiActionLog: { tool: string; args: any; success: boolean; message: string }[] = [];
 
                     // Healing turns — capped by MAX_HEAL_TURNS (default 3, was 10).
                     // Healing is a "Hail Mary" — 2-3 attempts is enough; more wastes LLM time.
@@ -1813,24 +2165,111 @@ After completing all steps, you MUST output this JSON on the last line: {"verdic
                             try {
                                 if (toolName === 'playwright_mark_step') {
                                     healMessages.push({ role: 'tool', tool_call_id: tc2.id, content: JSON.stringify({ success: true }) });
+                                    // Track mark_step calls so coverage check
+                                    // sees them. They're not "real UI actions"
+                                    // but the per-step assignment logic looks
+                                    // for them by tool name.
+                                    healUiActionLog.push({ tool: toolName, args, success: true, message: `mark_step(${args?.stepIndex || '?'})` });
                                 } else {
                                     const res = await client!.callTool({ name: toolName, arguments: args });
                                     healMessages.push({ role: 'tool', tool_call_id: tc2.id, content: trimToolText(JSON.stringify(res.content)) });
+                                    // Categorize: only count actual UI-modifying
+                                    // tools (click/fill/etc) — not get_visible_text
+                                    // or other utility reads.
+                                    if (UI_ACTION_TOOLS.has(toolName)) {
+                                        healUiActionLog.push({ tool: toolName, args, success: true, message: `${toolName}(${JSON.stringify(args).slice(0, 80)})` });
+                                    }
                                 }
                             } catch (e: any) {
                                 console.error(`  🧬 HEAL Tool Error: ${e.message}`);
                                 healMessages.push({ role: 'tool', tool_call_id: tc2.id, content: `Error: ${e.message}` });
+                                if (UI_ACTION_TOOLS.has(toolName)) {
+                                    healUiActionLog.push({ tool: toolName, args, success: false, message: `${toolName} failed: ${e.message?.slice(0, 100)}` });
+                                }
                             }
                         }
                     }
 
                     if (healVerdict === 'PASS') {
-                        console.log(`🩹 AUTO-HEAL SUCCESS: Test case healed on retry!`);
-                        // Update the result
+                        // ── Heal-path integrity check ────────────────────────
+                        // Verify the healer actually reached every step before
+                        // we accept its PASS. Reuse the same coverage logic as
+                        // the main pass: which step numbers did mark_step
+                        // calls cover?
+                        const healMarkedSteps = new Set(
+                            healUiActionLog
+                                .filter(a => a.tool === 'playwright_mark_step' && typeof a.args?.stepIndex === 'number')
+                                .map(a => a.args.stepIndex as number),
+                        );
+                        const expectedSteps = (tc.steps || []).length;
+                        const healSkipped: { idx: number; text: string }[] = [];
+                        for (let s = 1; s <= expectedSteps; s++) {
+                            if (!healMarkedSteps.has(s)) healSkipped.push({ idx: s, text: tc.steps[s - 1] });
+                        }
+
                         const healedResult = results[results.length - 1];
-                        healedResult.status = 'PASS';
-                        healedResult.actualResult = `🩹 Healed on retry: ${healActualResult || 'Test passed after auto-healing'}`;
-                        healedResult.error = undefined;
+                        if (healSkipped.length > 0 && healSkipped.length < expectedSteps) {
+                            // Healer reached SOME steps but not all. Reject its
+                            // PASS — show the truth in the UI instead of a
+                            // misleading green checkmark beside red "Step not
+                            // reached" rows.
+                            const skippedList = healSkipped.map(u => `Step ${u.idx} ("${u.text}")`).slice(0, 3).join('; ');
+                            const more = healSkipped.length > 3 ? ` +${healSkipped.length - 3} more` : '';
+                            console.warn(`  🚫 Rejecting healer PASS verdict: ${healSkipped.length}/${expectedSteps} step(s) still unmarked after healing.`);
+                            healedResult.status = 'FAIL';
+                            healedResult.actualResult = `🩹 Heal attempt declared PASS but still skipped ${healSkipped.length}/${expectedSteps} step(s): ${skippedList}${more}. (Healer reasoning: ${healActualResult || '<none>'})`;
+                            // Mark the test as heal-failed so the UI badge is honest.
+                            healedResult.healingFailed = true;
+                            healedResult.healed = false;
+                        } else {
+                            // Healer reached every step — accept the PASS AND
+                            // rebuild stepResults so the UI shows the healed
+                            // actions instead of the original failed ones.
+                            console.log(`🩹 AUTO-HEAL SUCCESS: Test case healed on retry — coverage check passed.`);
+                            healedResult.status = 'PASS';
+                            healedResult.actualResult = `🩹 Healed on retry: ${healActualResult || 'Test passed after auto-healing'}`;
+                            healedResult.error = undefined;
+                            healedResult.healed = true;
+                            healedResult.healingFailed = false;
+
+                            // Rebuild stepResults from healUiActionLog using
+                            // the same mark_step-based slicing logic as the
+                            // main pass. This makes the UI show the steps the
+                            // healer actually performed (not the steps the
+                            // original failed run did).
+                            const rebuiltSteps: typeof stepResults = [];
+                            for (let idx = 0; idx < tc.steps.length; idx++) {
+                                const stepText: string = tc.steps[idx];
+                                const stepNum = idx + 1;
+                                const curMark = healUiActionLog.findIndex(a => a.tool === 'playwright_mark_step' && a.args?.stepIndex === stepNum);
+                                const nxtMark = healUiActionLog.findIndex(a => a.tool === 'playwright_mark_step' && a.args?.stepIndex === stepNum + 1);
+                                let stepActions: typeof healUiActionLog = [];
+                                if (curMark !== -1) {
+                                    stepActions = healUiActionLog.slice(curMark + 1, nxtMark !== -1 ? nxtMark : healUiActionLog.length);
+                                    if (stepNum === 1) {
+                                        stepActions = [...healUiActionLog.slice(0, curMark), ...stepActions];
+                                    }
+                                }
+                                const realStepActions = stepActions.filter(a => a.tool !== 'playwright_mark_step');
+                                let stepResultDetails = '';
+                                let stepPassed = true;
+                                if (realStepActions.length > 0) {
+                                    stepPassed = realStepActions.every(a => a.success);
+                                    stepResultDetails = realStepActions
+                                        .map(a => `${a.success ? '✅' : '❌'} ${describeUIAction(a)}`)
+                                        .join('\n');
+                                } else {
+                                    // Step was marked but no UI actions — same
+                                    // passive-step heuristic as the main pass.
+                                    const passiveLooking = /\b(leave\s+\w+\s+(?:field\s+)?empty|empty|blank|do\s+not|don'?t|without|wait|observe|verify|confirm)\b/i.test(stepText);
+                                    stepResultDetails = passiveLooking
+                                        ? 'No browser action required (acknowledged after heal).'
+                                        : 'Acknowledged after heal; no UI action logged.';
+                                }
+                                rebuiltSteps.push({ step: `Step ${stepNum}: ${stepText}`, result: stepResultDetails, passed: stepPassed });
+                            }
+                            healedResult.steps = rebuiltSteps;
+                        }
                     } else {
                         console.log(`❌ AUTO-HEAL FAILED: Test case could not be healed.`);
                     }
@@ -1935,6 +2374,584 @@ After completing all steps, you MUST output this JSON on the last line: {"verdic
  *  Workload distribution is round-robin (worker N gets every Nth test) so
  *  long tests don't pile up in one worker.
  * ════════════════════════════════════════════════════════════════════════════ */
+
+// ════════════════════════════════════════════════════════════════════════════
+//  PER-STEP ORCHESTRATOR — opt-in alternative to the giant single-conversation
+//  agent above. Each test step gets its OWN focused LLM conversation with a
+//  tight turn budget (default 6), so the LLM doesn't have to track 15 steps
+//  worth of context simultaneously. The browser session (cookies, navigation
+//  state) persists across steps via the shared MCP client.
+//
+//  Trade-offs vs the legacy runAgent:
+//    + MUCH more reliable on long flows (15+ steps) — each conversation is
+//      focused on one thing, no "I forgot Step 9 existed" drift.
+//    + Failures are localized — when a step fails we know exactly which one,
+//      and can short-circuit the test case instead of spinning.
+//    + Cheaper per turn: smaller prompt, smaller history, fewer tokens.
+//    - More LLM calls overall (one mini-conversation per step) — could be
+//      slightly slower on tests the legacy agent would breeze through.
+//    - Auto-heal is currently NOT wired into this path (legacy agent still
+//      handles healing). If a per-step run fails, the test reports honestly.
+//
+//  Opt in by setting PER_STEP_MODE=1 in the backend env. Default OFF so this
+//  doesn't disturb runs that are currently passing.
+// ════════════════════════════════════════════════════════════════════════════
+
+export async function runAgentPerStep(
+    testCasesInput: string | any[],
+    llmConfig: any,
+    onProgress?: (status: { currentCase: string; progress: number; total: number; action?: string; currentCaseId?: string; currentCaseName?: string }) => void,
+    options?: { autoHeal?: boolean; headed?: boolean }
+): Promise<ExecutionReport> {
+    console.log('🚀 Starting Per-Step MCP Agent (focused mini-conversation per step)...');
+    const headed = options?.headed !== false;
+    const startTime = Date.now();
+    const MAX_TURNS_PER_STEP = Number(process.env.MAX_TURNS_PER_STEP) || 6;
+    const TOOL_RESULT_CHARS = Number(process.env.TOOL_RESULT_CHARS) || 2000;
+
+    const testCases = typeof testCasesInput === 'string'
+        ? parseTestCases(testCasesInput)
+        : (testCasesInput as any[]);
+    if (testCases.length === 0) {
+        return {
+            summary: { total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, duration: 0, executedAt: new Date().toISOString() },
+            results: [],
+        };
+    }
+
+    // Same prefix-strip as legacy: a 14-step plan with "Step 13. Click X" text
+    // confuses the agent into using the embedded number for mark_step.
+    const stripEmbeddedStepPrefix = (s: string): string => s ? s.replace(/^\s*step\s+\d+\s*[:.\-)]\s*/i, '').trimStart() : s;
+    for (const tc of testCases) {
+        if (Array.isArray(tc.steps)) {
+            tc.steps = tc.steps.map((s: any) => typeof s === 'string' ? stripEmbeddedStepPrefix(s) : s);
+        }
+    }
+
+    const trimToolText = (text: string): string => {
+        if (!text || text.length <= TOOL_RESULT_CHARS) return text;
+        return text.slice(0, TOOL_RESULT_CHARS) + `\n…[truncated ${text.length - TOOL_RESULT_CHARS} chars]`;
+    };
+
+    const UI_ACTION_TOOLS = new Set([
+        'playwright_navigate', 'navigate',
+        'playwright_click', 'click',
+        'playwright_fill', 'fill',
+        'playwright_type', 'type',
+        'playwright_press_key', 'press_key',
+        'playwright_select_option', 'select', 'select_option',
+        'playwright_check', 'check',
+        'playwright_fill_form',
+        'playwright_smart_fill_page',
+        'playwright_mark_step',
+    ]);
+
+    const describeUIAction = (a: { tool: string; args: any }): string => {
+        const x = a.args || {};
+        switch (a.tool) {
+            case 'playwright_navigate': case 'navigate': return `Navigate to: ${x.url || '(url)'}`;
+            case 'playwright_click': case 'click': return `Click: "${String(x.selector || '').replace(/^text=/, '').replace(/"/g, '')}"`;
+            case 'playwright_fill': case 'fill': return `Fill "${String(x.selector || '').replace(/^#/, '')}" with "${x.value}"`;
+            case 'playwright_type': case 'type': return `Type "${x.value}" into "${x.selector}"`;
+            case 'playwright_press_key': case 'press_key': return `Press: ${x.key || '(key)'}`;
+            case 'playwright_select_option': case 'select': case 'select_option': return `Select "${x.value}" in "${x.selector}"`;
+            case 'playwright_check': case 'check': return `Check: "${x.selector}"`;
+            case 'playwright_mark_step': return `mark_step(${x.stepIndex || '?'}, "${String(x.stepDescription || '').slice(0, 60)}")`;
+            default: return `${a.tool}(${JSON.stringify(x).slice(0, 80)})`;
+        }
+    };
+
+    // ── MCP connection ──────────────────────────────────────────────────────
+    let client: Client | null = null;
+    let mcpTools: any[] = [];
+    try {
+        const localMcpScript = path.join(__dirname, 'playwright-mcp.ts');
+        const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+        const command = npxCmd;
+        const args = fs.existsSync(localMcpScript) ? ['tsx', localMcpScript] : ['-y', '@playwright/mcp@latest'];
+        const transport = new StdioClientTransport({
+            command,
+            args,
+            env: { ...(process.env as Record<string, string>), MCP_HEADLESS: headed ? '0' : '1' },
+        });
+        client = new Client({ name: 'test-runner-per-step', version: '1.0.0' }, { capabilities: {} });
+        await Promise.race([
+            client.connect(transport),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('MCP connection timeout after 30s')), 30000)),
+        ]);
+        const toolsRes = await client.listTools();
+        mcpTools = toolsRes.tools;
+    } catch (err: any) {
+        console.error(`❌ Per-step agent: MCP connect failed: ${err.message}`);
+        return {
+            summary: { total: testCases.length, passed: 0, failed: 0, skipped: 0, errors: testCases.length, duration: Date.now() - startTime, executedAt: new Date().toISOString() },
+            results: testCases.map((tc: any) => ({
+                id: tc.id, name: tc.name, jiraKey: tc.jiraKey, priority: tc.priority,
+                status: 'ERROR' as const, steps: [],
+                expectedResult: tc.expectedResult, actualResult: '', error: `MCP setup failed: ${err.message}`,
+                duration: 0, testData: tc.testData,
+            })),
+        };
+    }
+
+    // Format tools for OpenAI tool-calling shape. Drop tools whose schema
+    // has `format: "uri"` since some providers reject that.
+    const sanitize = (schema: any): any => {
+        if (!schema || typeof schema !== 'object') return schema;
+        const out: any = Array.isArray(schema) ? [] : {};
+        for (const k of Object.keys(schema)) {
+            if (k === 'format' && schema[k] === 'uri') continue;
+            out[k] = sanitize(schema[k]);
+        }
+        return out;
+    };
+    const ensureMarkStep = (() => {
+        if (mcpTools.some(t => t.name === 'playwright_mark_step')) return mcpTools;
+        return [...mcpTools, {
+            name: 'playwright_mark_step',
+            description: 'Mark the beginning of a new test step.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    stepIndex: { type: 'number', description: '1-based index of the step' },
+                    stepDescription: { type: 'string', description: 'Brief description' },
+                },
+                required: ['stepIndex'],
+            },
+        }];
+    })();
+    const finalFormattedTools = ensureMarkStep.map(t => ({
+        type: 'function' as const,
+        function: {
+            name: t.name,
+            description: t.description || '',
+            parameters: sanitize(t.inputSchema || { type: 'object', properties: {} }),
+        },
+    }));
+
+    const getBaseURL = (cfg: any): string => {
+        switch (cfg.provider) {
+            case 'Groq': return 'https://api.groq.com/openai/v1';
+            case 'Ollama': return `${(cfg.baseUrl || 'http://localhost:11434').replace(/\/$/, '')}/v1`;
+            case 'Gemini': return 'https://generativelanguage.googleapis.com/v1beta/openai/';
+            default: return cfg.baseUrl || 'https://api.openai.com/v1';
+        }
+    };
+    const openai = new OpenAI({ apiKey: llmConfig.apiKey || 'dummy', baseURL: getBaseURL(llmConfig) });
+
+    // Reuse the legacy siteCheatsheet logic — saucedemo is the highest-value
+    // bake-in. Could be expanded to other known stable sites later.
+    const buildSiteCheatsheet = (tcText: string): string => {
+        if (!/saucedemo\.com/i.test(tcText)) return '';
+        return `
+SITE CHEATSHEET — saucedemo.com (DOM is stable; USE THESE VERBATIM):
+- Login: #user-name, #password, #login-button. Users: standard_user / problem_user / performance_glitch_user / error_user / visual_user. Password (all): secret_sauce. Error banner: [data-test="error"].
+- Inventory: cart icon #shopping_cart_container; cart badge .shopping_cart_badge. Add-to-cart per product: #add-to-cart-<name-lowercased-with-hyphens> (e.g. #add-to-cart-sauce-labs-backpack). After clicking Add, the button is REPLACED by #remove-<same-name>.
+- Cart (/cart.html): item rows .cart_item (multi-match — use .first() or filter); item names [data-test="inventory-item-name"]; Checkout #checkout; Continue Shopping #continue-shopping.
+- Checkout step one: #first-name, #last-name, #postal-code, #continue, #cancel.
+- Checkout step two: #finish, #cancel.
+- Complete page: visible "Thank you for your order!"; #back-to-products.
+`;
+    };
+
+    // Helpers for the test-case loop.
+    // Extract the application URL the LLM should navigate to. We REQUIRE
+    // http(s):// — earlier versions would silently pass back "#" or empty
+    // string when the test plan only had a placeholder, and the LLM would
+    // then call playwright_navigate(url="#") which Playwright rejects with
+    // "no valid URL provided".
+    const extractValidHttpUrl = (text: string): string | null => {
+        if (!text) return null;
+        const m = text.match(/(https?:\/\/[^\s)"'`<>]+)/i);
+        if (!m) return null;
+        const url = m[1].replace(/[)"',.;]+$/, '').trim();
+        // Ignore obvious placeholders/anchors.
+        if (/^https?:\/\/?$/i.test(url) || url === 'http://' || url === 'https://') return null;
+        return url;
+    };
+    const extractUrl = (tc: any): string | null => {
+        const searchString = `${tc.preconditions || ''} ${tc.testData || ''} ${tc.steps?.join(' ') || ''} ${tc.expectedResult || ''}`;
+        return extractValidHttpUrl(searchString);
+    };
+
+    // Cross-test-case URL fallback: scan EVERY test case in the plan once
+    // and pick the first valid URL we find. If a single tc has no URL in
+    // its own fields (common when the markdown puts the URL only on tc 1),
+    // we use this as the inherited target.
+    const fallbackUrl: string | null = (() => {
+        for (const tc of testCases) {
+            const url = extractUrl(tc);
+            if (url) return url;
+        }
+        return null;
+    })();
+    if (fallbackUrl) {
+        console.log(`🌐 Per-step fallback URL (for tcs missing their own): ${fallbackUrl}`);
+    } else {
+        console.warn(`⚠️ No http(s):// URL found anywhere in the test plan. All test cases will fail at step 1 unless the LLM has prior knowledge of the URL.`);
+    }
+
+    // Resolve a snapshot tool name once — different MCP versions expose it as
+    // either `playwright_get_visible_text` or `browser_get_visible_text`.
+    // Falling back to whatever exists; if neither, page state stays empty.
+    const snapshotToolName = (() => {
+        const candidates = ['playwright_get_visible_text', 'browser_get_visible_text', 'playwright_get_html'];
+        for (const name of candidates) {
+            if (mcpTools.some(t => t.name === name)) return name;
+        }
+        return null;
+    })();
+    const videoStartTool = mcpTools.some(t => t.name === 'playwright_start_recording') ? 'playwright_start_recording' : null;
+    const videoStopTool = mcpTools.some(t => t.name === 'playwright_stop_recording') ? 'playwright_stop_recording' : null;
+    console.log(`🔎 Per-step session ready — ${mcpTools.length} tools available. Snapshot tool: ${snapshotToolName ?? '(none)'}, video: ${videoStartTool ? 'on' : 'off'}.`);
+
+    // ── Per-test-case execution loop ────────────────────────────────────────
+    let lastKnownUrl: string | null = null;
+    const results: TestCaseResult[] = [];
+    for (let i = 0; i < testCases.length; i++) {
+        const tc = testCases[i];
+        if (isStopRequested()) {
+            console.log('🛑 Stop requested — halting per-step agent.');
+            break;
+        }
+        const tcStart = Date.now();
+        console.log(`\n${'='.repeat(80)}`);
+        console.log(`▶ TC-${tc.id}: ${tc.name} [${i + 1}/${testCases.length}] — per-step mode`);
+        console.log(`${'='.repeat(80)}`);
+
+        // Resolve URL with this priority:
+        //   1. URL inside THIS tc's fields (preconditions / testData / steps)
+        //   2. URL from the previous test case (lastKnownUrl)
+        //   3. URL found anywhere in the WHOLE test plan (fallbackUrl)
+        // Without (3), tcs whose markdown rows are sparse would have no URL
+        // even when other tcs in the same plan clearly target the same app.
+        let urlFromPreconditions = extractUrl(tc);
+        if (urlFromPreconditions) {
+            lastKnownUrl = urlFromPreconditions;
+        } else if (lastKnownUrl) {
+            urlFromPreconditions = lastKnownUrl;
+            console.log(`   ℹ️ Inheriting URL from previous test case: ${lastKnownUrl}`);
+        } else if (fallbackUrl) {
+            urlFromPreconditions = fallbackUrl;
+            console.log(`   ℹ️ Falling back to plan-wide URL: ${fallbackUrl}`);
+        }
+        if (!urlFromPreconditions) {
+            console.warn(`   ⚠️ No URL found for TC-${tc.id} — step 1 will FAIL fast with a clear error rather than guessing.`);
+        } else {
+            console.log(`   🌐 Target URL: ${urlFromPreconditions}`);
+        }
+
+        // Start video recording for this test case (best-effort).
+        let videoFile = '';
+        if (videoStartTool) {
+            try {
+                const startRes = await client.callTool({ name: videoStartTool, arguments: { testCaseId: `tc_${Date.now()}` } });
+                const startText = (startRes.content as any)?.[0]?.text || '';
+                const videoMatch = startText.match(/Video will be saved (?:to|as):\s*(.+)/i);
+                if (videoMatch) videoFile = videoMatch[1].trim();
+            } catch { /* recording is optional */ }
+        }
+
+        const tcText = `${tc.name} ${tc.expectedResult || ''} ${(tc.steps || []).join(' ')} ${tc.testData || ''} ${urlFromPreconditions || ''}`;
+        const siteCheatsheet = buildSiteCheatsheet(tcText);
+
+        const stepResults: { step: string; result: string; passed: boolean }[] = [];
+        const cumulativeActions: { tool: string; args: any; success: boolean; message: string }[] = [];
+        let testCaseFailed = false;
+        let testCaseFailureReason = '';
+
+        for (let stepIdx = 0; stepIdx < tc.steps.length; stepIdx++) {
+            if (isStopRequested()) { testCaseFailed = true; testCaseFailureReason = 'Stopped by user'; break; }
+            const stepNum = stepIdx + 1;
+            const stepText: string = tc.steps[stepIdx];
+
+            onProgress?.({
+                currentCase: `TC-${tc.id} · Step ${stepNum}/${tc.steps.length}`,
+                currentCaseId: `TC-${tc.id}`,
+                currentCaseName: `${tc.name} — Step ${stepNum}: ${stepText.slice(0, 60)}`,
+                progress: i + 1,
+                total: testCases.length,
+                action: stepText,
+            });
+
+            // Capture current page state for context. Best-effort — if the
+            // browser hasn't navigated yet (step 1), we get a blank snapshot.
+            let pageSnapshot = '';
+            if (snapshotToolName) {
+                try {
+                    const visRes = await client.callTool({ name: snapshotToolName, arguments: {} }).catch(() => null);
+                    if (visRes) {
+                        const txt = (visRes.content as any)?.[0]?.text;
+                        if (typeof txt === 'string') pageSnapshot = txt.slice(0, 1500);
+                    }
+                } catch { /* page state is optional context */ }
+            }
+
+            // Brief summary of what previous steps accomplished, so the LLM
+            // has continuity without re-reading every action.
+            const prevSummary = stepResults.length === 0
+                ? '(this is the first step)'
+                : stepResults.map((s, idx) => `  ${idx + 1}. ${s.passed ? '✅' : '❌'} ${s.step.replace(/^Step \d+:\s*/, '')}`).join('\n');
+
+            // Step-1 early-out: if no URL is known, don't even bother asking
+            // the LLM — it'll hallucinate "#" and we'll fail with a confusing
+            // "page.goto error" three turns later. Fail fast with a clear
+            // message naming the missing field.
+            if (stepNum === 1 && !urlFromPreconditions) {
+                console.warn(`     ↳ ABORTING TC-${tc.id}: no URL extractable from the test plan.`);
+                const failMsg = `Test plan has no http(s):// URL in preconditions, test data, or step text. Cannot navigate. Add a Preconditions row like "URL: https://www.saucedemo.com/" (or include the URL inside the step text) and re-run.`;
+                stepResults.push({
+                    step: `Step 1: ${stepText}`,
+                    result: `⚠ ${failMsg}`,
+                    passed: false,
+                });
+                for (let j = 1; j < tc.steps.length; j++) {
+                    stepResults.push({
+                        step: `Step ${j + 1}: ${tc.steps[j]}`,
+                        result: `⚠ Step not reached — execution stopped after Step 1 failed (no URL to navigate to).`,
+                        passed: false,
+                    });
+                }
+                testCaseFailed = true;
+                testCaseFailureReason = failMsg;
+                break;
+            }
+
+            // Build per-step navigation hint. On step 1 the browser is fresh
+            // so we explicitly tell the LLM to navigate to the test URL.
+            const navigationHint = stepNum === 1 && urlFromPreconditions
+                ? `\n\nIMPORTANT — STEP 1 STARTUP: The browser is on a blank page. Your FIRST browser action (after playwright_mark_step) MUST be to navigate to:\n   ${urlFromPreconditions}\nUsing: playwright_navigate(url="${urlFromPreconditions}") (or your client's navigate tool). Do NOT navigate to "#" or any URL without http(s)://. Then perform the step.`
+                : '';
+
+            const systemPrompt = `You are executing ONE STEP of a Playwright browser test. Your job is to perform that single step, then STOP — do not return a verdict, do not move on to other steps. The orchestrator will call you again for the next step.
+
+RULES:
+1. CALL playwright_mark_step(stepIndex=${stepNum}, stepDescription="<short>") as your FIRST tool call.
+2. Then perform the browser action(s) required for the step. Use the most stable selector available (id > data-test > role > text).
+3. For "discover before clicking" non-form buttons (Add to Cart, Cart icon, etc.) use playwright_evaluate with a short script that lists visible buttons with their id/data-test/text, then click the EXACT id/data-test the script returned.
+4. If the step is passive ("leave field empty", "wait for page to load", "observe X") just call mark_step and stop — no other action is required.
+5. When the step is complete, STOP CALLING TOOLS. The orchestrator will detect that and move on.
+6. If you genuinely cannot complete this step (selector missing, element won't appear), call playwright_get_visible_text once to capture diagnostic context, then stop — the test will be marked failed with that context.
+
+NEVER:
+- Skip the mark_step call.
+- Try to do multiple steps in this one conversation.
+- Return a verdict JSON — that's the orchestrator's job.
+${siteCheatsheet}`;
+
+            const userPrompt = `Test Case: ${tc.name}
+Test URL: ${urlFromPreconditions || '(not provided — extract from test data or steps if needed)'}
+Test Data: ${tc.testData || '(none)'}
+
+PREVIOUS STEPS (already completed in this same browser session):
+${prevSummary}
+
+CURRENT PAGE STATE (visible text, may be partial):
+${pageSnapshot || '(no snapshot available — likely the very first action)'}${navigationHint}
+
+YOUR STEP (do ONLY this — call mark_step(${stepNum}, ...) first):
+Step ${stepNum} of ${tc.steps.length}: ${stepText}`;
+
+            console.log(`   ▶ Step ${stepNum}/${tc.steps.length}: ${stepText.slice(0, 80)}`);
+
+            const messages: any[] = [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt },
+            ];
+            const stepActions: { tool: string; args: any; success: boolean; message: string }[] = [];
+            let stepFailureReason: string | undefined;
+
+            for (let turn = 0; turn < MAX_TURNS_PER_STEP; turn++) {
+                if (isStopRequested()) { stepFailureReason = 'Stopped by user'; break; }
+                let response: any;
+                try {
+                    response = await openai.chat.completions.create({
+                        model: llmConfig.model || 'gpt-4o',
+                        messages,
+                        tools: finalFormattedTools,
+                        temperature: 0.1,
+                    });
+                } catch (llmErr: any) {
+                    stepFailureReason = `LLM API error: ${llmErr.message}`;
+                    break;
+                }
+                const msg = response.choices?.[0]?.message;
+                if (!msg) { stepFailureReason = 'LLM returned no message'; break; }
+                messages.push(msg);
+
+                const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+                if (toolCalls.length === 0) {
+                    // LLM stopped calling tools → step is done (per our prompt).
+                    break;
+                }
+
+                for (const tcRaw of toolCalls) {
+                    const tcAny = tcRaw as any;
+                    const toolName = tcAny.function?.name;
+                    let args: any = {};
+                    try {
+                        args = typeof tcAny.function?.arguments === 'string'
+                            ? JSON.parse(tcAny.function.arguments)
+                            : tcAny.function?.arguments || {};
+                    } catch { args = {}; }
+
+                    // Navigation guardrail: refuse to call navigate with a
+                    // non-http URL. Auto-rewrite to the test's known URL if
+                    // we have one (this rescues runs where the LLM hallucinated
+                    // "#" instead of using the URL we put in the prompt).
+                    if (/navigate$/i.test(toolName || '') && args && typeof args.url === 'string') {
+                        const u = args.url.trim();
+                        if (!/^https?:\/\//i.test(u)) {
+                            if (urlFromPreconditions) {
+                                console.warn(`     ⚠ LLM tried to navigate to "${u}" — rewriting to known URL "${urlFromPreconditions}".`);
+                                args = { ...args, url: urlFromPreconditions };
+                            } else {
+                                const reason = `Refused to navigate: LLM passed url="${u}" which is not a valid http(s) URL and no Test URL is known for this run.`;
+                                console.warn(`     ✗ ${reason}`);
+                                messages.push({ role: 'tool', tool_call_id: tcAny.id, content: `Error: ${reason}` });
+                                stepActions.push({ tool: toolName, args, success: false, message: reason });
+                                continue;
+                            }
+                        }
+                    }
+
+                    try {
+                        let toolText = '';
+                        if (toolName === 'playwright_mark_step') {
+                            toolText = JSON.stringify({ success: true, message: `Marked step ${args.stepIndex ?? '?'}` });
+                            stepActions.push({ tool: toolName, args, success: true, message: `mark_step(${args.stepIndex ?? '?'})` });
+                        } else {
+                            const res = await client.callTool({ name: toolName, arguments: args });
+                            toolText = res.isError ? `Error: ${JSON.stringify(res.content)}` : JSON.stringify(res.content);
+                            const isUi = UI_ACTION_TOOLS.has(toolName);
+                            if (isUi) {
+                                stepActions.push({
+                                    tool: toolName, args, success: !res.isError,
+                                    message: `${toolName}(${args.selector || args.url || JSON.stringify(args).slice(0, 60)})${res.isError ? ' — error' : ''}`,
+                                });
+                            }
+                        }
+                        messages.push({ role: 'tool', tool_call_id: tcAny.id, content: trimToolText(toolText) });
+                    } catch (toolErr: any) {
+                        const isUi = UI_ACTION_TOOLS.has(toolName);
+                        if (isUi) {
+                            stepActions.push({ tool: toolName, args, success: false, message: `${toolName} failed: ${toolErr.message?.slice(0, 120) || 'unknown'}` });
+                        }
+                        messages.push({ role: 'tool', tool_call_id: tcAny.id, content: `Error: ${toolErr.message || 'tool execution failed'}` });
+                    }
+                }
+            }
+
+            // Evaluate the step's success:
+            // - Pass: mark_step was called for this stepNum AND no UI action failed
+            // - Pass (passive): mark_step was called and no UI actions besides mark_step
+            // - Fail: anything else
+            // LLMs occasionally send stepIndex as a string ("2") not a number,
+            // so we coerce both sides before comparing.
+            const markStepForThis = stepActions.some(
+                a => a.tool === 'playwright_mark_step' && Number(a.args?.stepIndex) === stepNum,
+            );
+            const realActions = stepActions.filter(a => a.tool !== 'playwright_mark_step');
+
+            // Diagnostic: see exactly what the LLM did in this step. Without
+            // this it's impossible to tell from the report whether the LLM
+            // never called mark_step, called it with the wrong index, or
+            // crashed mid-step.
+            const dbg = stepActions.map(a => `${a.success ? '✓' : '✗'} ${a.tool}${a.tool === 'playwright_mark_step' ? `(stepIndex=${a.args?.stepIndex})` : ''}`).join(', ') || '(no tool calls)';
+            console.log(`     ↳ ${stepActions.length} tool call(s): ${dbg}`);
+            if (stepFailureReason) console.log(`     ↳ FAILURE: ${stepFailureReason}`);
+            const anyFailed = realActions.some(a => !a.success);
+            const passiveLooking = /\b(leave\s+\w+\s+(?:field\s+)?empty|empty|blank|do\s+not|don'?t|without|wait|observe|verify|confirm)\b/i.test(stepText);
+
+            let resultDetails: string;
+            let passed: boolean;
+            if (stepFailureReason) {
+                resultDetails = stepFailureReason;
+                passed = false;
+            } else if (!markStepForThis) {
+                resultDetails = `⚠ Step not reached — the agent did not call playwright_mark_step(${stepNum}, ...) within the ${MAX_TURNS_PER_STEP}-turn budget for this step.`;
+                passed = false;
+            } else if (anyFailed) {
+                resultDetails = realActions.map(a => `${a.success ? '✅' : '❌'} ${describeUIAction(a)}`).join('\n');
+                passed = false;
+            } else if (realActions.length === 0) {
+                resultDetails = passiveLooking
+                    ? 'No browser action required for this step (passive: acknowledged, condition satisfied implicitly).'
+                    : 'Step marked but no browser action logged. Consider whether the LLM missed an intended action.';
+                passed = true;
+            } else {
+                resultDetails = realActions.map(a => `${a.success ? '✅' : '❌'} ${describeUIAction(a)}`).join('\n');
+                passed = true;
+            }
+
+            stepResults.push({ step: `Step ${stepNum}: ${stepText}`, result: resultDetails, passed });
+            cumulativeActions.push(...stepActions);
+
+            if (!passed && !testCaseFailed) {
+                testCaseFailed = true;
+                testCaseFailureReason = `Step ${stepNum} failed: ${resultDetails.split('\n')[0].slice(0, 200)}`;
+                console.log(`  ⏭ Short-circuiting test case — Step ${stepNum} failed. Remaining steps marked unreached.`);
+                // Fill remaining steps as "not reached" so the report is complete.
+                for (let j = stepIdx + 1; j < tc.steps.length; j++) {
+                    stepResults.push({
+                        step: `Step ${j + 1}: ${tc.steps[j]}`,
+                        result: `⚠ Step not reached — execution stopped after Step ${stepNum} failed.`,
+                        passed: false,
+                    });
+                }
+                break;
+            }
+        }
+
+        // Verdict
+        const verdict: 'PASS' | 'FAIL' = testCaseFailed ? 'FAIL' : 'PASS';
+        const actualResult = testCaseFailed
+            ? testCaseFailureReason
+            : `All ${tc.steps.length} step(s) executed successfully via per-step orchestration. (Note: this confirms each step's browser action ran without runtime errors. Expected Result verification is the test plan author's responsibility — review the per-step actions to confirm the test plan was actually satisfied.)`;
+
+        // Stop video recording (best-effort; tool may not exist on every MCP build).
+        if (videoStopTool) {
+            try {
+                const stopRes = await client.callTool({ name: videoStopTool, arguments: {} });
+                const stopText = (stopRes.content as any)?.[0]?.text || '';
+                const videoMatch = stopText.match(/Video saved:\s*(.+)/);
+                if (videoMatch) videoFile = videoMatch[1].trim();
+            } catch { /* ignore */ }
+        }
+
+        const tcResult: TestCaseResult = {
+            id: tc.id,
+            name: tc.name,
+            jiraKey: tc.jiraKey,
+            priority: tc.priority,
+            status: verdict,
+            steps: stepResults,
+            expectedResult: tc.expectedResult,
+            actualResult,
+            duration: Date.now() - tcStart,
+            videoFile,
+            testData: tc.testData,
+        };
+        results.push(tcResult);
+        addPartialResult(tcResult);
+
+        console.log(`✅ TC-${tc.id} per-step run done: ${verdict} (${stepResults.length} steps, ${stepResults.filter(s => s.passed).length} passed)`);
+    }
+
+    // Close MCP client.
+    try { await client.close?.(); } catch { /* ignore */ }
+
+    const summary = {
+        total: results.length,
+        passed: results.filter(r => r.status === 'PASS').length,
+        failed: results.filter(r => r.status === 'FAIL').length,
+        errors: results.filter(r => r.status === 'ERROR').length,
+        skipped: results.filter(r => r.status === 'SKIPPED').length,
+        duration: Date.now() - startTime,
+        executedAt: new Date().toISOString(),
+    };
+    return { summary, results };
+}
 
 export interface ParallelProgress {
     workerId: number;
