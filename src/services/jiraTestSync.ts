@@ -1,11 +1,7 @@
 import axios from 'axios';
 import { Connection } from '../types';
 import { ParsedTestCase } from '../utils/testPlanParser';
-
-const backendUrl = () => {
-  const host = window.location.hostname || 'localhost';
-  return `http://${host}:3001`;
-};
+import { backendUrl } from './backendUrl';
 
 export type TestManagementProvider = 'jira-native' | 'xray';
 

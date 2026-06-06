@@ -1,9 +1,5 @@
 import axios from 'axios';
-
-const backendUrl = () => {
-  const host = window.location.hostname || 'localhost';
-  return `http://${host}:3001`;
-};
+import { backendUrl } from './backendUrl';
 
 export interface EmailConfig {
   enabled: boolean;

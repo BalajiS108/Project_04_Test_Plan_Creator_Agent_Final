@@ -13,10 +13,7 @@ import { JiraIssue } from '../types';
  *  - `description` carries the chunked content the LLM should reason over
  */
 
-const backendUrl = () => {
-  const host = window.location.hostname || 'localhost';
-  return `http://${host}:3001`;
-};
+import { backendUrl } from './backendUrl';
 
 const unwrapError = (e: any, source: string): never => {
   if (e.code === 'ECONNABORTED') throw new Error(`${source} request timed out.`);

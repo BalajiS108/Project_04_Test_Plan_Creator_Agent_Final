@@ -168,7 +168,31 @@ if (!fs.existsSync(videosDir)) fs.mkdirSync(videosDir, { recursive: true });
 if (!fs.existsSync(testsGeneratedDir)) fs.mkdirSync(testsGeneratedDir, { recursive: true });
 
 const app = express();
-app.use(cors());
+
+// CORS: in local dev, allow any origin (frontend at :5173, backend at :3001).
+// In production, lock down to one or more explicit frontend origins set via
+// FRONTEND_ORIGIN env var (comma-separated for multiple). Without this, a
+// production deployment would accept requests from any site on the internet.
+//
+// Examples for backend/.env or Render env vars:
+//   FRONTEND_ORIGIN=https://my-app.vercel.app
+//   FRONTEND_ORIGIN=https://my-app.vercel.app,https://my-app-preview.vercel.app
+const corsOriginEnv = (process.env.FRONTEND_ORIGIN || '').trim();
+if (corsOriginEnv) {
+    const allowedOrigins = corsOriginEnv.split(',').map(s => s.trim()).filter(Boolean);
+    app.use(cors({
+        origin: (origin, cb) => {
+            if (!origin) return cb(null, true);  // server-to-server, curl, etc.
+            if (allowedOrigins.includes(origin)) return cb(null, true);
+            return cb(new Error(`CORS: origin ${origin} not in FRONTEND_ORIGIN allowlist`));
+        },
+        credentials: true,
+    }));
+    console.log(`🔒 CORS locked to ${allowedOrigins.length} origin(s): ${allowedOrigins.join(', ')}`);
+} else {
+    app.use(cors());  // permissive — fine for localhost dev
+}
+
 app.use(express.json({ limit: '10mb' }));
 
 // Logger middleware

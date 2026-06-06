@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { parseTestPlanMarkdown } from '../utils/testPlanParser';
 import { pushTestCases, syncExecutionResults, SyncResultPayload, TestManagementProvider } from '../services/jiraTestSync';
+import { backendUrl as resolveBackendUrl } from '../services/backendUrl';
 
 interface StepResult {
   step: string;
@@ -432,8 +433,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
     setExecutionProgress({ currentCase: 'Starting...', progress: 0, total: 0, action: '' });
     setWorkerStatuses([]);
 
-    const host = window.location.hostname || 'localhost';
-    const backendUrl = `http://${host}:3001`;
+    const backendUrl = resolveBackendUrl();
 
     statusIntervalRef.current = setInterval(async () => {
       try {
@@ -577,8 +577,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
   const statusIntervalRef = React.useRef<any>(null);
 
   const fetchScriptLibrary = async () => {
-    const host = window.location.hostname || 'localhost';
-    const res = await fetch(`http://${host}:3001/api/list-scripts`);
+    const res = await fetch(`${resolveBackendUrl()}/api/list-scripts`);
     const data = await res.json();
     setScriptLibrary(data.scripts || []);
   };
@@ -613,8 +612,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
       total: 0
     });
 
-    const host = window.location.hostname || 'localhost';
-    const backendUrl = `http://${host}:3001`;
+    const backendUrl = resolveBackendUrl();
 
     statusIntervalRef.current = setInterval(async () => {
       try {
@@ -663,8 +661,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
   const stopExecution = async () => {
     try {
       clearInterval(statusIntervalRef.current);
-      const host = window.location.hostname || 'localhost';
-      const backendUrl = `http://${host}:3001`;
+      const backendUrl = resolveBackendUrl();
 
       // 1. Signal backend to stop (kills both MCP and script-mode processes)
       await fetch(`${backendUrl}/api/stop`, { method: 'POST' });
@@ -729,8 +726,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
     setCreatingBugFor(tc.id);
     setBugError(null);
 
-    const host = window.location.hostname || 'localhost';
-    const backendUrl = `http://${host}:3001`;
+    const backendUrl = resolveBackendUrl();
 
     try {
       const res = await fetch(`${backendUrl}/api/jira/create-bug`, {
