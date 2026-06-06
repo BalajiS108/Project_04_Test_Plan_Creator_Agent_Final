@@ -145,6 +145,13 @@ function App() {
     if (conn) setActiveConnection(conn);
   };
 
+  // Once we reach step 4, mount TestPlanView once and keep it mounted for
+  // the lifetime of the session so navigating to History Trends and back
+  // doesn't blow away the execution report. The unmount/remount we used
+  // to do dropped report, htmlReportUrl, error banners, expanded rows etc.
+  const [hasReachedTestPlan, setHasReachedTestPlan] = useState(false);
+  useEffect(() => { if (step === 4) setHasReachedTestPlan(true); }, [step]);
+
   const renderStep = () => {
     switch (step) {
       case 1: return <JiraConnection
@@ -192,14 +199,9 @@ function App() {
         sourceLabel={sourceLabel}
         inputSource={inputSource}
       />;
-      case 4: return <TestPlanView
-        plan={generatedPlan}
-        productName={productName}
-        llmConfig={llmConfig}
-        connection={activeConnection}
-        projectKey={projectKey}
-        onOpenHistory={() => setView('history')}
-      />;
+      // case 4 (TestPlanView) is rendered persistently outside this switch
+      // — see the render block below.
+      case 4: return null;
       default: return <JiraConnection
         activeConnection={activeConnection}
         connections={connections}
@@ -558,6 +560,22 @@ function App() {
         <main className="flex-1 p-4">
           <div className="bg-white border border-slate-200/80 rounded-[2rem] p-6 shadow-[0_24px_48px_-12px_rgba(0,0,0,0.06)] min-h-[600px] flex flex-col transition-colors duration-300 dark:bg-slate-900 dark:border-slate-800 dark:shadow-[0_24px_48px_-12px_rgba(0,0,0,0.4)]">
             <div className="flex-1 animate-in fade-in slide-in-from-bottom-4 duration-700">
+              {/* TestPlanView is mounted persistently once we've reached
+                  step 4 so its internal execution-report state survives
+                  navigating to History Trends and back. We hide via CSS
+                  instead of conditional render to preserve component state. */}
+              {hasReachedTestPlan && (
+                <div className={view === 'wizard' && step === 4 ? '' : 'hidden'}>
+                  <TestPlanView
+                    plan={generatedPlan}
+                    productName={productName}
+                    llmConfig={llmConfig}
+                    connection={activeConnection}
+                    projectKey={projectKey}
+                    onOpenHistory={() => setView('history')}
+                  />
+                </div>
+              )}
               {view === 'history'
                 ? <HistoryDashboard onBack={() => setView('wizard')} />
                 : view === 'audit'
@@ -568,7 +586,9 @@ function App() {
                       ? <PerformanceTesting onBack={() => setView('wizard')} />
                       : view === 'cicd'
                         ? <CICDDashboard onBack={() => setView('wizard')} />
-                        : renderStep()}
+                        : step === 4
+                          ? null /* rendered above, kept alive */
+                          : renderStep()}
             </div>
           </div>
         </main>
@@ -590,6 +610,7 @@ function App() {
         onSaveLLM={handleSaveLLM}
         isDarkMode={isDarkMode}
         onToggleTheme={toggleTheme}
+        authUser={authUser}
       />
     </div>
   )

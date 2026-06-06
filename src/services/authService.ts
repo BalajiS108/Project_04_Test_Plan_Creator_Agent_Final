@@ -74,3 +74,36 @@ export const clearSession = () => {
   localStorage.removeItem(USER_KEY);
   applyAuthToken(null);
 };
+
+// ── Admin: user management ────────────────────────────────────────────────
+// These hit endpoints guarded by requireAdmin; the axios default Authorization
+// header (set by applyAuthToken on login/restoreSession) attaches the admin's
+// JWT automatically.
+export interface UserSummary {
+  username: string;
+  role: 'admin' | 'user';
+  createdAt: string;
+}
+
+export const fetchUsers = async (): Promise<UserSummary[]> => {
+  const res = await axios.get(`${backendUrl()}/api/auth/users`, { timeout: 10000 });
+  return res.data?.users || [];
+};
+
+export const createUser = async (
+  username: string,
+  password: string,
+  role: 'admin' | 'user',
+): Promise<{ user: AuthUser }> => {
+  // Same endpoint as register but the admin JWT is attached automatically.
+  const res = await axios.post(
+    `${backendUrl()}/api/auth/register`,
+    { username, password, role },
+    { timeout: 15000 },
+  );
+  return res.data;
+};
+
+export const deleteUserByUsername = async (username: string): Promise<void> => {
+  await axios.delete(`${backendUrl()}/api/auth/users/${encodeURIComponent(username)}`, { timeout: 10000 });
+};

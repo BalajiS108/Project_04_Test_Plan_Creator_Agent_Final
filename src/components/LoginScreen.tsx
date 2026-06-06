@@ -75,7 +75,17 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ bootstrapMode, onAuthe
           </div>
         )}
 
-        <form onSubmit={submit} className="space-y-4">
+        {/*
+          autoComplete="off" on the form + autoComplete="new-password" on the
+          password field is the most reliable cross-browser way to suppress
+          saved-credential autofill. (Browsers ignore plain `off` on password
+          fields specifically, but they respect `new-password` — that hint
+          tells the browser this is a NEW password being created, so the
+          saved-credentials popup isn't offered.)
+          Effect: the login form always opens empty after logout, even when
+          the browser has saved credentials for this site.
+        */}
+        <form onSubmit={submit} className="space-y-4" autoComplete="off">
           <div>
             <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2 dark:text-slate-400">Username</label>
             <div className="relative">
@@ -85,7 +95,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ bootstrapMode, onAuthe
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 required
-                autoComplete="username"
+                autoComplete="off"
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-3 text-sm font-medium focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100"
               />
             </div>
@@ -100,7 +110,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ bootstrapMode, onAuthe
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
+                autoComplete="new-password"
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-3 text-sm font-medium focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none dark:bg-slate-800 dark:border-slate-700 dark:text-slate-100"
               />
             </div>
@@ -142,13 +152,14 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ bootstrapMode, onAuthe
           </button>
         </form>
 
+        {/* "Register" link removed — this app has no self-service signup.
+            Once the first admin exists, new accounts can only be created by
+            an admin via Settings → Users. The old link sent an unauthenticated
+            register request that always 401'd, which was confusing. */}
         {!bootstrapMode && (
-          <button
-            onClick={() => { setMode((m) => (m === 'login' ? 'register' : 'login')); setError(null); }}
-            className="w-full text-center text-xs text-slate-400 hover:text-blue-600 mt-4"
-          >
-            {mode === 'login' ? "Don't have an account? Register" : 'Already have an account? Sign in'}
-          </button>
+          <p className="w-full text-center text-[10px] text-slate-400 mt-4 px-4">
+            Need an account? Ask your administrator to create one for you from Settings → Users.
+          </p>
         )}
       </div>
     </div>

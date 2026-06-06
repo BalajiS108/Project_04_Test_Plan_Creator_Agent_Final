@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { X, ShieldCheck, Database, Cpu, Zap, Loader2, CheckCircle2, AlertCircle, Bell, Send, Sun, Moon, Palette } from 'lucide-react';
+import { X, ShieldCheck, Database, Cpu, Zap, Loader2, CheckCircle2, AlertCircle, Bell, Send, Sun, Moon, Palette, Users } from 'lucide-react';
+import { UsersPanel } from './UsersPanel';
+import { AuthUser } from '../services/authService';
 import { ALMProvider, LLMProvider, Connection, LLMConfig } from '../types';
 import { verifyJiraConnection } from '../services/jiraService';
 import { verifyOllama, verifyGroq, verifyOpenAI, verifyGemini } from '../services/llmService';
@@ -20,6 +22,9 @@ interface SettingsModalProps {
   // Appearance tab — theme toggle moved here from the sidebar.
   isDarkMode: boolean;
   onToggleTheme: () => void;
+  // Current authenticated user — used to gate the Users tab to admins only,
+  // and to disable self-delete inside the panel. Null when auth is OFF.
+  authUser?: AuthUser | null;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -31,8 +36,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSaveLLM,
   isDarkMode,
   onToggleTheme,
+  authUser,
 }) => {
-  const [activeTab, setActiveTab] = useState<'jira' | 'llm' | 'notify' | 'appearance'>('jira');
+  const isAdmin = !!authUser && authUser.role === 'admin';
+  const [activeTab, setActiveTab] = useState<'jira' | 'llm' | 'notify' | 'appearance' | 'users'>('jira');
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ status: 'success' | 'error' | 'warning', message: string } | null>(null);
 
@@ -204,11 +211,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <Palette size={15} />
             Appearance
           </button>
+          {/* Users tab — admin-only. Hidden entirely for non-admins so it
+              doesn't surface a button that just 403s when clicked. */}
+          {isAdmin && (
+            <button
+              onClick={() => { setActiveTab('users'); setTestResult(null); }}
+              className={`flex-1 flex items-center justify-center gap-2.5 py-3 rounded-xl transition-all duration-300 font-black text-[11px] uppercase tracking-widest ${activeTab === 'users' ? 'bg-white shadow-md text-blue-600 translate-y-[-1px]' : 'text-slate-400 hover:text-slate-500'
+                }`}
+            >
+              <Users size={15} />
+              Users
+            </button>
+          )}
         </div>
 
         {/* Modal Body */}
         <div className="px-10 pb-10 overflow-y-auto flex-1">
-          {activeTab === 'appearance' ? (
+          {activeTab === 'users' && isAdmin && authUser ? (
+            <UsersPanel currentUser={authUser} />
+          ) : activeTab === 'appearance' ? (
             <div className="space-y-6">
               <div>
                 <label className="block text-[9px] font-black uppercase tracking-[0.3em] text-slate-400 mb-3 ml-1">Theme</label>

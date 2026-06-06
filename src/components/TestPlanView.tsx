@@ -4,7 +4,7 @@ import {
   CheckCircle2, XCircle, AlertTriangle, Clock,
   ChevronDown, ChevronRight, BarChart3, FileSpreadsheet,
   Zap, Activity, Code2, TrendingUp, Shield, Target,
-  FolderOpen, Terminal, Loader2, Bug, ExternalLink, Sparkles, Bot, Upload, RefreshCw, Link2
+  FolderOpen, Loader2, Bug, ExternalLink, Sparkles, Bot, Upload, RefreshCw, Link2
 } from 'lucide-react';
 import { parseTestPlanMarkdown } from '../utils/testPlanParser';
 import { pushTestCases, syncExecutionResults, SyncResultPayload, TestManagementProvider } from '../services/jiraTestSync';
@@ -66,13 +66,10 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
   const [htmlReportUrl, setHtmlReportUrl] = useState<string | null>(null);
   const [expandedCases, setExpandedCases] = useState<Set<number>>(new Set());
   const [isPartialReport, setIsPartialReport] = useState(false);
-  const [isGeneratingScripts, setIsGeneratingScripts] = useState(false);
   const [scriptsUrl, setScriptsUrl] = useState<string | null>(null);
   const [generatedScriptPath, setGeneratedScriptPath] = useState<string | null>(null);
-  const [showScriptLibrary, setShowScriptLibrary] = useState(false);
-  // Each script entry may carry per-test last-run status (PASS/FAIL/SKIPPED)
-  // pulled from the sidecar written by /api/run-playwright. `tests` can be
-  // either a plain array of names (older shape) or objects with status info.
+  // Script Library — shows the 5 most recently generated specs in tests/generated/.
+  // Useful for re-running a past spec without regenerating (which is non-deterministic).
   type ScriptTestEntry = string | { name: string; status?: 'PASS' | 'FAIL' | 'SKIPPED'; duration?: number; error?: string };
   type ScriptLibraryEntry = {
     name: string;
@@ -83,17 +80,14 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
     tests?: ScriptTestEntry[];
     lastRun?: { executedAt: string; passed: number; failed: number; skipped: number; total: number; duration: number };
   };
+  const SCRIPT_LIBRARY_VISIBLE = 5;
+  const [showScriptLibrary, setShowScriptLibrary] = useState(false);
   const [scriptLibrary, setScriptLibrary] = useState<ScriptLibraryEntry[]>([]);
-  // Per-suite expansion state for the Script Library — lets the user inspect
-  // the test names inside a .spec.ts before running it.
-  const [expandedScripts, setExpandedScripts] = useState<Set<string>>(new Set());
-  // Show the most recent 5 by default; user can click "Show all" to expand.
-  // Older suites pile up over time and dilute the at-a-glance view.
-  const [showAllScripts, setShowAllScripts] = useState<boolean>(false);
-  const SCRIPT_LIBRARY_DEFAULT_VISIBLE = 5;
   const [loadingLibrary, setLoadingLibrary] = useState(false);
   const [runningScript, setRunningScript] = useState<string | null>(null);
-  const [scriptRunOutput, setScriptRunOutput] = useState<{path: string; output: string; passed: number; failed: number} | null>(null);
+  // Per-spec expansion state — lets the user reveal the test titles
+  // inside a saved spec (with their last-run PASS/FAIL status) on demand.
+  const [expandedSpecs, setExpandedSpecs] = useState<Set<string>>(new Set());
   const [executionProgress, setExecutionProgress] = useState<{
     currentCase: string;
     currentCaseId?: string;
@@ -258,6 +252,15 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
     return undefined;
   };
 
+  // Format Jira keys for status messages: "KAN-1, KAN-2, KAN-3" up to N,
+  // then "+M more" so a long list doesn't blow out the banner.
+  const formatJiraKeys = (keys: string[], max: number = 5): string => {
+    const unique = Array.from(new Set(keys.filter(Boolean)));
+    if (unique.length === 0) return '';
+    if (unique.length <= max) return unique.join(', ');
+    return `${unique.slice(0, max).join(', ')}, +${unique.length - max} more`;
+  };
+
   const handlePushToJira = async () => {
     if (!connection) {
       setPushSyncMessage({ kind: 'error', text: 'Configure a Jira connection in Settings first.' });
@@ -282,7 +285,16 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
     // Only push cases that aren't already mapped
     const toPush = parsedTestCases.filter((tc) => !tcMapping[tc.tcId]);
     if (toPush.length === 0) {
-      setPushSyncMessage({ kind: 'info', text: `All ${parsedTestCases.length} test cases already linked to Jira.` });
+      // List ONLY the keys linked to the CURRENT plan's test cases, not the
+      // full historical tcMapping (which could include past pushes from
+      // other plans for the same project — confusing).
+      const existingKeys = formatJiraKeys(parsedTestCases.map((tc) => tcMapping[tc.tcId]).filter(Boolean));
+      setPushSyncMessage({
+        kind: 'info',
+        text: existingKeys
+          ? `All ${parsedTestCases.length} test cases already linked to Jira: ${existingKeys}.`
+          : `All ${parsedTestCases.length} test cases already linked to Jira.`,
+      });
       return;
     }
 
@@ -295,12 +307,21 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
       setJiraBaseUrl(result.baseUrl);
       persistMapping(merged, result.baseUrl);
 
+      // Newly-created keys come from this push (result.mapping), so users
+      // see exactly which Jira issues were just created — not the full
+      // historical mapping.
+      const newKeys = formatJiraKeys(Object.values(result.mapping));
       if (result.errors.length === 0) {
-        setPushSyncMessage({ kind: 'success', text: `Pushed ${result.count}/${result.total} test cases to Jira.` });
+        setPushSyncMessage({
+          kind: 'success',
+          text: newKeys
+            ? `Pushed ${result.count}/${result.total} test cases to Jira: ${newKeys}.`
+            : `Pushed ${result.count}/${result.total} test cases to Jira.`,
+        });
       } else {
         setPushSyncMessage({
           kind: 'error',
-          text: `Pushed ${result.count}/${result.total}. Errors: ${result.errors.slice(0, 2).map(e => `${e.tcId}: ${e.error}`).join('; ')}${result.errors.length > 2 ? '...' : ''}`,
+          text: `Pushed ${result.count}/${result.total}${newKeys ? ` (${newKeys})` : ''}. Errors: ${result.errors.slice(0, 2).map(e => `${e.tcId}: ${e.error}`).join('; ')}${result.errors.length > 2 ? '...' : ''}`,
         });
       }
     } catch (e: any) {
@@ -364,12 +385,22 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
       const xrayNote = result.testExecutionKey
         ? ` · Xray Test Execution created: ${result.testExecutionKey}`
         : '';
+      // Tell the user exactly which Jira issues were updated. Sync includes
+      // every issue we sent in the payload minus those that errored — list
+      // the ones we actually attempted (errors are reported separately).
+      const erroredKeys = new Set(result.errors.map(e => e.jiraKey));
+      const syncedKeys = formatJiraKeys(payload.map(p => p.jiraKey).filter(k => !erroredKeys.has(k)));
       if (result.errors.length === 0) {
-        setPushSyncMessage({ kind: 'success', text: `Synced ${result.count}/${result.total} results to Jira.${xrayNote}` });
+        setPushSyncMessage({
+          kind: 'success',
+          text: syncedKeys
+            ? `Synced ${result.count}/${result.total} results to Jira: ${syncedKeys}.${xrayNote}`
+            : `Synced ${result.count}/${result.total} results to Jira.${xrayNote}`,
+        });
       } else {
         setPushSyncMessage({
           kind: 'error',
-          text: `Synced ${result.count}/${result.total}.${xrayNote} Errors: ${result.errors.slice(0, 2).map(e => `${e.jiraKey}: ${e.error}`).join('; ')}${result.errors.length > 2 ? '...' : ''}`,
+          text: `Synced ${result.count}/${result.total}${syncedKeys ? ` (${syncedKeys})` : ''}.${xrayNote} Errors: ${result.errors.slice(0, 2).map(e => `${e.jiraKey}: ${e.error}`).join('; ')}${result.errors.length > 2 ? '...' : ''}`,
         });
       }
     } catch (e: any) {
@@ -427,52 +458,35 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
 
     try {
       if (executionMethod === 'codegen') {
-        // "Run with Playwright Script Mode" used to always regenerate the
-        // .spec.ts via /api/generate-scripts before running. Because LLM
-        // output is non-deterministic, the same test plan would yield
-        // slightly different specs on each click — leading to flaky pass
-        // rates compared to the Script Library "Run" (which reuses the
-        // saved spec) and the terminal `npx playwright test` (same).
-        //
-        // New behavior: prefer reusing a previously-generated script for
-        // this product. Only generate fresh when none exists. This makes
-        // codegen Run, Library Run, and terminal all consistent — they
-        // all execute the same file. Use "Save Script File" to force a
-        // fresh LLM generation when you want to refresh from a new plan.
-        const safeName = (productName || 'Project').replace(/[^a-zA-Z0-9_-]/g, '_');
-        let scriptToRun: string | null = null;
-        let scriptDisplay = '';
-        try {
-          const listRes = await fetch(`${backendUrl}/api/list-scripts`);
-          const listData = await listRes.json();
-          const candidate = (listData.scripts || [])
-            .filter((s: any) => typeof s.relativePath === 'string' && s.relativePath.includes(`/${safeName}/`))
-            .sort((a: any, b: any) => new Date(b.created).getTime() - new Date(a.created).getTime())[0];
-          if (candidate) {
-            scriptToRun = candidate.path;
-            scriptDisplay = candidate.name;
-          }
-        } catch { /* fall through to generation */ }
-
-        if (!scriptToRun) {
-          setExecutionProgress({ currentCase: 'No saved script — generating one…', progress: 0, total: 0, action: 'Asking the LLM to write the test code' });
-          const genRes = await fetch(`${backendUrl}/api/generate-scripts`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ testCases: plan, llmConfig, productName }),
-          });
-          const genData = await genRes.json();
-          if (!genData.success || !genData.filePath) {
-            throw new Error(genData.error || 'Script generation failed — nothing to run.');
-          }
-          try { await loadScriptLibrary(); } catch { /* non-fatal */ }
-          setScriptsUrl(`${backendUrl}${genData.scriptUrl}`);
-          setGeneratedScriptPath(genData.filePath || null);
-          scriptToRun = genData.fullPath || genData.filePath;
-          scriptDisplay = String(genData.filePath || '').split('/').pop() || 'generated.spec.ts';
+        // Run with Playwright Script Mode now ALWAYS regenerates the
+        // .spec.ts from the current plan before running. The old behaviour
+        // (reuse last saved spec, regenerate only via a separate "Save
+        // Script File" button) confused users into thinking script mode
+        // was running stale code. Generating fresh on each run matches
+        // the user's mental model: "click Run → produce + execute the
+        // script for what's on screen right now". The trade-off is that
+        // LLM non-determinism can yield slightly different specs between
+        // back-to-back runs — that's acceptable cost for the clearer UX.
+        setExecutionProgress({ currentCase: 'Generating Playwright script from current plan…', progress: 0, total: 0, action: 'Asking the LLM to write the test code' });
+        const genRes = await fetch(`${backendUrl}/api/generate-scripts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ testCases: plan, llmConfig, productName }),
+        });
+        const genData = await genRes.json();
+        if (!genData.success || !genData.filePath) {
+          throw new Error(genData.error || 'Script generation failed — nothing to run.');
         }
+        setScriptsUrl(`${backendUrl}${genData.scriptUrl}`);
+        setGeneratedScriptPath(genData.filePath || null);
+        const scriptToRun: string = genData.fullPath || genData.filePath;
+        const scriptDisplay = String(genData.filePath || '').split('/').pop() || 'generated.spec.ts';
 
-        setExecutionProgress({ currentCase: `Launching Playwright on ${scriptDisplay}…`, progress: 0, total: 0, action: 'Running saved script (click "Save Script File" to regenerate from current plan)' });
+        // Refresh Script Library in the background so the just-generated
+        // spec shows up at the top of the list when the user opens it.
+        fetchScriptLibrary().catch(() => { /* non-fatal */ });
+
+        setExecutionProgress({ currentCase: `Running ${genData.filePath || scriptDisplay}`, progress: 0, total: 0, action: `npx playwright test ${genData.filePath || scriptDisplay}` });
         const runRes = await fetch(`${backendUrl}/api/run-playwright`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -488,6 +502,9 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
         const runData = await runRes.json();
         if (runData.report) {
           setReport(runData.report);
+          // Explicitly mark as full report — guards against a late
+          // stopExecution callback overwriting the title to "Partial".
+          setIsPartialReport(false);
           if (runData.report.htmlReportUrl) setHtmlReportUrl(runData.report.htmlReportUrl);
           showBrowserNotification(runData.report);
         } else if (runData.success === false) {
@@ -516,6 +533,8 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
         const data = await response.json();
         if (data.success) {
           setReport(data.report);
+          // Explicit reset — see comment in codegen branch above.
+          setIsPartialReport(false);
           setReportDownloadUrl(data.reportDownloadUrl ? `${backendUrl}${data.reportDownloadUrl}` : null);
           setHtmlReportUrl(data.htmlReportUrl ? `${backendUrl}${data.htmlReportUrl}` : null);
           showBrowserNotification(data.report);
@@ -557,40 +576,18 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
 
   const statusIntervalRef = React.useRef<any>(null);
 
-  const generateScripts = async () => {
-    setIsGeneratingScripts(true);
-    setScriptsUrl(null);
-    setGeneratedScriptPath(null);
+  const fetchScriptLibrary = async () => {
     const host = window.location.hostname || 'localhost';
-    const backendUrl = `http://${host}:3001`;
-
-    try {
-      const res = await fetch(`${backendUrl}/api/generate-scripts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ testCases: plan, llmConfig, productName })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setScriptsUrl(`${backendUrl}${data.scriptUrl}`);
-        setGeneratedScriptPath(data.filePath || null);
-      } else {
-        alert('Script generation failed: ' + data.error);
-      }
-    } catch (e: any) {
-      console.error('Script generation error:', e);
-      alert(`Error reaching backend at ${backendUrl}: ` + e.message);
-    } finally {
-      setIsGeneratingScripts(false);
-    }
+    const res = await fetch(`http://${host}:3001/api/list-scripts`);
+    const data = await res.json();
+    setScriptLibrary(data.scripts || []);
   };
 
-  const loadScriptLibrary = async () => {
+  // User-facing: open the panel and fetch fresh data.
+  const openScriptLibrary = async () => {
     setLoadingLibrary(true);
     try {
-      const res = await fetch('http://127.0.0.1:3001/api/list-scripts');
-      const data = await res.json();
-      setScriptLibrary(data.scripts || []);
+      await fetchScriptLibrary();
       setShowScriptLibrary(true);
     } catch (e) {
       alert('Failed to load script library');
@@ -601,15 +598,17 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
 
   const runScript = async (scriptPath: string, scriptName: string) => {
     setRunningScript(scriptName);
-    setScriptRunOutput(null);
-    setReport(null); // Clear previous report
+    setReport(null);
     setIsPartialReport(false);
     setIsExecuting(true);
+    // Show the script being run in the "Now executing" banner.
+    const relForBanner = scriptPath.replace(/\\/g, '/').replace(/^.*?(tests\/generated\/)/, '$1');
+    setGeneratedScriptPath(relForBanner);
     setExecutionProgress({
       currentCase: `Launching: ${scriptName}`,
       currentCaseId: 'SCRIPT',
       currentCaseName: scriptName,
-      action: 'Starting Playwright...',
+      action: `npx playwright test ${relForBanner}`,
       progress: 0,
       total: 0
     });
@@ -617,17 +616,10 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
     const host = window.location.hostname || 'localhost';
     const backendUrl = `http://${host}:3001`;
 
-    // Poll the backend so the user sees per-test progress as the Playwright
-    // CLI streams its `list` reporter output. Without this the UI was stuck
-    // on the initial "Running: <scriptName>" message for the entire run.
     statusIntervalRef.current = setInterval(async () => {
       try {
         const r = await fetch(`${backendUrl}/api/execution-status`);
         const d = await r.json();
-        // Was gated on currentCaseId === 'SCRIPT', but the backend now switches
-        // currentCaseId to per-test ('T1', 'T2', ...) once tests start streaming.
-        // Just trust isRunning — any in-flight playwright run owns the global
-        // executionStatus object.
         if (d.isRunning) {
           setExecutionProgress({
             currentCase: d.currentCase,
@@ -638,46 +630,28 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
             action: d.action || ''
           });
         }
-      } catch { /* swallow; polling is best-effort */ }
+      } catch { /* best-effort polling */ }
     }, 1000);
 
     try {
       const res = await fetch(`${backendUrl}/api/run-playwright`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          scriptPath,
-          headed: headedMode,
-          // Self-healing for Script Library replays too — same opt-in toggle.
-          autoHeal: autoHealEnabled,
-          llmConfig,
-        })
+        body: JSON.stringify({ scriptPath, headed: headedMode, autoHeal: autoHealEnabled, llmConfig })
       });
       const data = await res.json();
-      
       if (data.report) {
         setReport(data.report);
+        setIsPartialReport(false);
         showBrowserNotification(data.report);
-        setShowScriptLibrary(false); // Close library to show report
-        if (data.report.htmlReportUrl) {
-          setHtmlReportUrl(data.report.htmlReportUrl);
-        }
-      } else {
-        setScriptRunOutput({ 
-          path: scriptName, 
-          output: data.output || '', 
-          passed: data.passed || 0, 
-          failed: data.failed || 0 
-        });
+        setShowScriptLibrary(false);
+        if (data.report.htmlReportUrl) setHtmlReportUrl(data.report.htmlReportUrl);
+      } else if (data.success === false) {
+        setExecutionError(data.error || 'Playwright execution failed.');
       }
     } catch (e: any) {
       console.error('Run script error:', e);
-      setScriptRunOutput({ 
-        path: scriptName, 
-        output: 'Error reaching backend: ' + e.message, 
-        passed: 0, 
-        failed: 0 
-      });
+      setExecutionError(`Failed to run ${scriptName}: ${e.message}`);
     } finally {
       clearInterval(statusIntervalRef.current);
       setRunningScript(null);
@@ -695,7 +669,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
       // 1. Signal backend to stop (kills both MCP and script-mode processes)
       await fetch(`${backendUrl}/api/stop`, { method: 'POST' });
       setIsExecuting(false);
-      setRunningScript(null); // Clear script-mode running state
+      setRunningScript(null);
       setExecutionProgress({ currentCase: 'Stopping... fetching partial results', progress: 0, total: 0, action: 'Stopping...' });
 
       // 2. Wait briefly for in-flight test case to finish writing its result
@@ -940,15 +914,10 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
             </button>
           </div>
 
-          <button
-            onClick={generateScripts}
-            disabled={isGeneratingScripts || !plan}
-            title="Generate a reusable Playwright .spec.ts file you can run later or commit to git"
-            className="flex items-center gap-2 px-4 py-2.5 bg-white text-violet-700 border border-violet-200 rounded-xl text-xs font-bold hover:bg-violet-50 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed dark:bg-slate-800 dark:text-violet-300 dark:border-violet-800 dark:hover:bg-violet-900/20"
-          >
-            {isGeneratingScripts ? <RefreshCcw size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />}
-            {isGeneratingScripts ? 'Saving...' : 'Save Script File'}
-          </button>
+          {/* "Save Script File" removed — Run with Playwright Script Mode
+              now generates the .spec.ts on every click, which matches the
+              user's mental model. The post-run "Test Script Generated ✓"
+              panel still offers a Download link for committing to git. */}
           <button
             onClick={executeTests}
             disabled={isExecuting || !plan}
@@ -1194,6 +1163,22 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
         </div>
       )}
 
+      {/* Codegen "what's running" banner — visible during the entire
+          Playwright Script Mode run so the user can verify the exact
+          .spec.ts being executed (matches the file under tests/generated/). */}
+      {isExecuting && (executionMethod === 'codegen' || runningScript) && generatedScriptPath && (
+        <div className="mb-4 flex items-center gap-3 px-4 py-3 rounded-xl bg-violet-50 border border-violet-200 dark:bg-violet-900/20 dark:border-violet-800">
+          <Code2 size={14} className="text-violet-600 dark:text-violet-400 flex-shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[10px] font-black uppercase tracking-widest text-violet-700 dark:text-violet-300">Now executing</p>
+            <p className="text-[11px] font-mono text-violet-700 dark:text-violet-200 truncate">{generatedScriptPath}</p>
+          </div>
+          <span className="text-[10px] font-mono bg-slate-900 text-emerald-400 px-2 py-1 rounded hidden md:inline-block whitespace-nowrap">
+            npx playwright test {generatedScriptPath}
+          </span>
+        </div>
+      )}
+
       {/* Execution Progress Bar — sequential mode (single worker) */}
       {isExecuting && workerStatuses.length <= 1 && (
         <div className="mb-8 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-2xl p-6 dark:from-emerald-900/20 dark:to-teal-900/20 dark:border-emerald-800">
@@ -1280,19 +1265,25 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
                 </a>
               )}
               <button
-                onClick={loadScriptLibrary}
+                onClick={openScriptLibrary}
                 disabled={loadingLibrary}
+                title="Browse the 5 most recently saved specs — re-run without regenerating"
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs font-bold hover:bg-slate-800 transition-all disabled:opacity-60"
               >
                 {loadingLibrary ? <RefreshCcw size={12} className="animate-spin" /> : <FolderOpen size={12} />}
-                Script Library
+                Saved Specs
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Script Library Panel */}
+      {/* Saved Specs Panel — 5 most recently saved specs in tests/generated/.
+          Useful for re-running a past spec without regenerating (LLM output
+          is non-deterministic, so the script you just ran is the one the
+          backend stored — running it again from here re-runs that exact code).
+          Each row expands to reveal the test titles inside, annotated with
+          their last-run PASS/FAIL status when known. */}
       {showScriptLibrary && (
         <div className="mb-6 bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-lg dark:bg-slate-900 dark:border-slate-800">
           <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-800 dark:to-slate-800/50 flex items-center justify-between">
@@ -1301,147 +1292,114 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
                 <FolderOpen size={16} className="text-violet-600" />
               </div>
               <div>
-                <h4 className="font-bold text-slate-800 dark:text-slate-100 text-sm">Generated Test Scripts Library</h4>
-                <p className="text-[10px] text-slate-400 font-mono">tests/generated/</p>
+                <h4 className="font-bold text-slate-800 dark:text-slate-100 text-sm">Saved Specs</h4>
+                <p className="text-[10px] text-slate-400 font-mono">tests/generated/ · last {SCRIPT_LIBRARY_VISIBLE}</p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <button onClick={() => setShowScriptLibrary(false)} className="px-3 py-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors text-xs font-bold border border-slate-200 dark:border-slate-700 rounded-lg">✕ Close</button>
-            </div>
+            <button onClick={() => setShowScriptLibrary(false)} className="px-3 py-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors text-xs font-bold border border-slate-200 dark:border-slate-700 rounded-lg">✕ Close</button>
           </div>
-
-          {scriptRunOutput && (
-            <div className={`mx-5 mt-4 rounded-xl border p-4 ${scriptRunOutput.failed > 0 ? 'bg-red-50 border-red-200 dark:bg-red-900/20 dark:border-red-800' : 'bg-emerald-50 border-emerald-200 dark:bg-emerald-900/20 dark:border-emerald-800'}`}>
-              <div className="flex items-center gap-3 mb-2">
-                <Terminal size={14} className={scriptRunOutput.failed > 0 ? 'text-red-500' : 'text-emerald-500'} />
-                <span className="text-xs font-black uppercase tracking-widest text-slate-500">Playwright Run: {scriptRunOutput.path}</span>
-                <span className="ml-auto text-xs font-bold text-emerald-600">{scriptRunOutput.passed} passed</span>
-                {scriptRunOutput.failed > 0 && <span className="text-xs font-bold text-red-600">{scriptRunOutput.failed} failed</span>}
-              </div>
-              <pre className="text-[10px] font-mono text-slate-600 dark:text-slate-300 whitespace-pre-wrap max-h-48 overflow-y-auto bg-slate-900 text-slate-100 p-3 rounded-lg">{scriptRunOutput.output || 'No output'}</pre>
-            </div>
-          )}
-
           <div className="divide-y divide-slate-100 dark:divide-slate-800">
-            <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-[400px] overflow-y-auto">
-              {(() => {
-                if (scriptLibrary.length === 0) {
-                  return <div className="p-10 text-center text-slate-400">No scripts found in tests/generated/</div>;
-                }
-                const sorted = [...scriptLibrary].sort((a, b) => new Date(b.created).getTime() - new Date(a.created).getTime());
-                const visible = showAllScripts ? sorted : sorted.slice(0, SCRIPT_LIBRARY_DEFAULT_VISIBLE);
-                return visible.map((script) => {
-                    const isExpanded = expandedScripts.has(script.path);
-                    const rawTests = script.tests || [];
-                    // Normalize string vs object shape into a uniform object array.
-                    const tests = rawTests.map((t) => typeof t === 'string' ? { name: t } : t);
-                    const lr = script.lastRun;
-                    const pillBase = 'text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border flex-shrink-0';
-                    const statusPill = (status?: 'PASS' | 'FAIL' | 'SKIPPED') => {
-                      if (status === 'PASS') return <span className={`${pillBase} text-emerald-700 bg-emerald-50 border-emerald-200 dark:text-emerald-300 dark:bg-emerald-900/30 dark:border-emerald-800`}>Pass</span>;
-                      if (status === 'FAIL') return <span className={`${pillBase} text-red-700 bg-red-50 border-red-200 dark:text-red-300 dark:bg-red-900/30 dark:border-red-800`}>Fail</span>;
-                      if (status === 'SKIPPED') return <span className={`${pillBase} text-slate-600 bg-slate-50 border-slate-200 dark:text-slate-400 dark:bg-slate-800 dark:border-slate-700`}>Skip</span>;
-                      return <span className={`${pillBase} text-slate-400 bg-slate-50 border-slate-200 dark:text-slate-500 dark:bg-slate-800 dark:border-slate-700`}>—</span>;
-                    };
-                    return (
-                      <div key={script.path}>
-                        <div className="flex items-center gap-3 px-5 py-3.5 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
-                          <button
-                            onClick={() => setExpandedScripts((prev) => {
-                              const next = new Set(prev);
-                              if (next.has(script.path)) next.delete(script.path); else next.add(script.path);
-                              return next;
-                            })}
-                            disabled={tests.length === 0}
-                            title={tests.length === 0 ? 'No tests detected in this file' : isExpanded ? 'Hide test names' : 'Show test names'}
-                            className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
-                          >
-                            {isExpanded ? <ChevronDown size={14} className="text-slate-500" /> : <ChevronRight size={14} className="text-slate-500" />}
-                          </button>
-                          <div className="p-2 bg-violet-50 dark:bg-violet-900/20 rounded-lg flex-shrink-0">
-                            <FileText size={14} className="text-violet-500" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <p className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{script.name}</p>
-                              <span className="text-[10px] font-black uppercase tracking-widest text-violet-700 bg-violet-50 px-2 py-0.5 rounded-full border border-violet-100 dark:bg-violet-900/30 dark:text-violet-300 dark:border-violet-800 flex-shrink-0">
-                                {tests.length} test{tests.length === 1 ? '' : 's'}
-                              </span>
-                              {lr && (
-                                <span
-                                  title={`Last run ${new Date(lr.executedAt).toLocaleString()} · ${(lr.duration / 1000).toFixed(1)}s`}
-                                  className="text-[10px] font-black uppercase tracking-widest text-slate-700 bg-white border border-slate-200 px-2 py-0.5 rounded-full flex items-center gap-1.5 flex-shrink-0 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300"
-                                >
-                                  <span className="text-emerald-600 dark:text-emerald-400">✓ {lr.passed}</span>
-                                  <span className="text-slate-300 dark:text-slate-600">·</span>
-                                  <span className="text-red-600 dark:text-red-400">✘ {lr.failed}</span>
-                                  {lr.skipped > 0 && (
-                                    <>
-                                      <span className="text-slate-300 dark:text-slate-600">·</span>
-                                      <span className="text-slate-500 dark:text-slate-400">⏭ {lr.skipped}</span>
-                                    </>
-                                  )}
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-[10px] font-mono text-slate-400 truncate">{script.relativePath}</p>
-                            <p className="text-[10px] text-slate-400">
-                              {new Date(script.created).toLocaleString()} · {(script.size / 1024).toFixed(1)} KB
-                              {lr && <> · last run {new Date(lr.executedAt).toLocaleString()}</>}
-                            </p>
-                          </div>
-                          <button
-                            onClick={() => runScript(script.path, script.name)}
-                            disabled={runningScript === script.name}
-                            className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-lg text-xs font-bold hover:from-emerald-700 hover:to-teal-700 transition-all disabled:opacity-60 flex-shrink-0"
-                          >
-                            {runningScript === script.name
-                              ? <><RefreshCcw size={12} className="animate-spin" /> Running...</>
-                              : <><Play size={12} /> Run</>}
-                          </button>
-                        </div>
-                        {isExpanded && tests.length > 0 && (
-                          <ol className="pl-16 pr-5 pb-3 space-y-1 bg-slate-50/50 dark:bg-slate-800/30">
-                            {tests.map((t, i) => (
-                              <li key={i} className="text-[11px] text-slate-600 dark:text-slate-300 flex items-center gap-2">
-                                <span className="text-slate-400 font-mono w-5 flex-shrink-0 text-right">{i + 1}.</span>
-                                <span className="flex-1 truncate" title={t.error || t.name}>{t.name}</span>
-                                {typeof t.duration === 'number' && t.duration > 0 && (
-                                  <span className="text-[10px] text-slate-400 tabular-nums">{(t.duration / 1000).toFixed(1)}s</span>
-                                )}
-                                {statusPill(t.status)}
-                              </li>
-                            ))}
-                          </ol>
-                        )}
-                      </div>
-                    );
-                  });
-              })()}
-            </div>
             {(() => {
-              const total = scriptLibrary.length;
-              const hidden = Math.max(0, total - SCRIPT_LIBRARY_DEFAULT_VISIBLE);
-              if (total <= SCRIPT_LIBRARY_DEFAULT_VISIBLE) return null;
-              return (
-                <div className="px-5 py-3 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30 text-center">
-                  <button
-                    type="button"
-                    onClick={() => setShowAllScripts((v) => !v)}
-                    className="text-[11px] font-bold uppercase tracking-widest text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 transition-colors"
-                  >
-                    {showAllScripts
-                      ? `Show less (latest ${SCRIPT_LIBRARY_DEFAULT_VISIBLE})`
-                      : `Show ${hidden} more (${total} total)`}
-                  </button>
-                </div>
-              );
+              if (scriptLibrary.length === 0) {
+                return <div className="p-10 text-center text-slate-400">No scripts found in tests/generated/</div>;
+              }
+              const recent = [...scriptLibrary]
+                .sort((a, b) => new Date(b.created).getTime() - new Date(a.created).getTime())
+                .slice(0, SCRIPT_LIBRARY_VISIBLE);
+              return recent.map((script) => {
+                const lr = script.lastRun;
+                const isRunning = runningScript === script.name;
+                const isExpanded = expandedSpecs.has(script.path);
+                // Normalize the two shapes the backend can return: bare string
+                // (older saves) or { name, status, duration, error } object.
+                const tests = (script.tests || []).map((t) => typeof t === 'string' ? { name: t } : t);
+                const hasTests = tests.length > 0;
+                const toggleExpand = () => {
+                  setExpandedSpecs((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(script.path)) next.delete(script.path);
+                    else next.add(script.path);
+                    return next;
+                  });
+                };
+                return (
+                  <div key={script.path}>
+                    <div className="flex items-center gap-3 px-5 py-3.5 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                      <button
+                        onClick={toggleExpand}
+                        disabled={!hasTests}
+                        title={!hasTests ? 'No tests detected in this spec' : isExpanded ? 'Hide test titles' : 'Show test titles'}
+                        className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+                      >
+                        {isExpanded
+                          ? <ChevronDown size={14} className="text-slate-500" />
+                          : <ChevronRight size={14} className="text-slate-500" />}
+                      </button>
+                      <div className="p-2 bg-violet-50 dark:bg-violet-900/20 rounded-lg flex-shrink-0">
+                        <FileText size={14} className="text-violet-500" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{script.name}</p>
+                          {hasTests && (
+                            <span className="text-[10px] font-black uppercase tracking-widest text-violet-700 bg-violet-50 px-2 py-0.5 rounded-full border border-violet-100 dark:bg-violet-900/30 dark:text-violet-300 dark:border-violet-800 flex-shrink-0">
+                              {tests.length} test{tests.length === 1 ? '' : 's'}
+                            </span>
+                          )}
+                          {lr && (
+                            <span
+                              title={`Last run ${new Date(lr.executedAt).toLocaleString()} · ${(lr.duration / 1000).toFixed(1)}s`}
+                              className="text-[10px] font-black uppercase tracking-widest text-slate-700 bg-white border border-slate-200 px-2 py-0.5 rounded-full flex items-center gap-1.5 flex-shrink-0 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300"
+                            >
+                              <span className="text-emerald-600 dark:text-emerald-400">✓ {lr.passed}</span>
+                              <span className="text-slate-300 dark:text-slate-600">·</span>
+                              <span className="text-red-600 dark:text-red-400">✘ {lr.failed}</span>
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[10px] font-mono text-slate-400 truncate">{script.relativePath}</p>
+                        <p className="text-[10px] text-slate-400">
+                          {new Date(script.created).toLocaleString()} · {(script.size / 1024).toFixed(1)} KB
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => runScript(script.path, script.name)}
+                        disabled={isExecuting}
+                        title={`Re-run this exact spec via npx playwright test ${script.relativePath}`}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-lg text-xs font-bold hover:from-emerald-700 hover:to-teal-700 transition-all disabled:opacity-60 flex-shrink-0"
+                      >
+                        {isRunning
+                          ? <><RefreshCcw size={12} className="animate-spin" /> Running...</>
+                          : <><Play size={12} /> Run</>}
+                      </button>
+                    </div>
+                    {isExpanded && hasTests && (
+                      <ol className="pl-16 pr-5 pb-3 space-y-1 bg-slate-50/50 dark:bg-slate-800/30">
+                        {tests.map((t, i) => {
+                          const statusIcon = t.status === 'PASS'
+                            ? <CheckCircle2 size={12} className="text-emerald-500 flex-shrink-0" />
+                            : t.status === 'FAIL'
+                              ? <XCircle size={12} className="text-red-500 flex-shrink-0" />
+                              : t.status === 'SKIPPED'
+                                ? <span className="w-3 h-3 rounded-full bg-slate-300 dark:bg-slate-600 flex-shrink-0" title="Skipped" />
+                                : <span className="w-3 h-3 rounded-full border border-slate-300 dark:border-slate-600 flex-shrink-0" title="Not run yet" />;
+                          return (
+                            <li key={i} className="text-[11px] text-slate-600 dark:text-slate-300 flex items-center gap-2 py-0.5">
+                              <span className="text-slate-400 font-mono w-5 flex-shrink-0 text-right">{i + 1}.</span>
+                              {statusIcon}
+                              <span className="flex-1 truncate" title={t.error || t.name}>{t.name}</span>
+                              {typeof t.duration === 'number' && t.duration > 0 && (
+                                <span className="text-[10px] text-slate-400 tabular-nums">{(t.duration / 1000).toFixed(1)}s</span>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    )}
+                  </div>
+                );
+              });
             })()}
-          </div>
-          <div className="px-5 py-3 bg-slate-50 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-700">
-            <p className="text-[10px] font-mono text-slate-400">
-              💡 Or run from terminal: <span className="bg-slate-800 text-emerald-400 px-2 py-0.5 rounded">npx playwright test tests/generated/ --headed</span>
-            </p>
           </div>
         </div>
       )}
@@ -1782,26 +1740,61 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
                         <div className="mt-2">
                           <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">Step-by-Step Execution</p>
                           <div className="space-y-2">
-                            {tc.steps.map((step, idx) => (
-                              <div
-                                key={idx}
-                                className={`flex items-start gap-3 px-4 py-3 rounded-lg border ${step.passed
-                                  ? 'bg-emerald-50/50 border-emerald-100 dark:bg-emerald-900/10 dark:border-emerald-800'
-                                  : 'bg-red-50/50 border-red-100 dark:bg-red-900/10 dark:border-red-800'
-                                  }`}
-                              >
-                                <div className="flex-shrink-0 mt-0.5">
-                                  {step.passed
-                                    ? <CheckCircle2 size={14} className="text-emerald-500" />
-                                    : <XCircle size={14} className="text-red-500" />
-                                  }
+                            {tc.steps.map((step, idx) => {
+                              // step.result is multi-line text built by the
+                              // backend: each line is either a per-action
+                              // marker (✅/❌ <description>) or an "Error: ..."
+                              // suffix appended when the step's overall
+                              // verdict is FAIL. Rendering it as one blob
+                              // hides the failure under the green ticks of
+                              // sub-actions that technically succeeded
+                              // (e.g. a click that worked but the post-
+                              // condition didn't hold). Split + style so
+                              // the error pops.
+                              const lines = (step.result || '').split('\n').map(l => l.trim()).filter(Boolean);
+                              const errorLines = lines.filter(l => /^error[:\s]/i.test(l));
+                              const actionLines = lines.filter(l => !/^error[:\s]/i.test(l));
+                              return (
+                                <div
+                                  key={idx}
+                                  className={`flex items-start gap-3 px-4 py-3 rounded-lg border ${step.passed
+                                    ? 'bg-emerald-50/50 border-emerald-100 dark:bg-emerald-900/10 dark:border-emerald-800'
+                                    : 'bg-red-50/50 border-red-100 dark:bg-red-900/10 dark:border-red-800'
+                                    }`}
+                                >
+                                  <div className="flex-shrink-0 mt-0.5">
+                                    {step.passed
+                                      ? <CheckCircle2 size={14} className="text-emerald-500" />
+                                      : <XCircle size={14} className="text-red-500" />
+                                    }
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-bold text-slate-800 dark:text-slate-200">{step.step}</p>
+                                    {actionLines.length > 0 && (
+                                      <ul className="mt-1.5 space-y-1 border-l-2 border-slate-200 dark:border-slate-700 pl-3 py-0.5">
+                                        {actionLines.map((line, li) => (
+                                          <li key={li} className="text-sm text-slate-600 dark:text-slate-400 flex items-start gap-1.5">
+                                            <span className="whitespace-pre-wrap">{line}</span>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    )}
+                                    {errorLines.length > 0 && (
+                                      <div className="mt-2 flex items-start gap-2 px-3 py-2 rounded-md bg-red-100/70 border border-red-200 dark:bg-red-900/30 dark:border-red-800">
+                                        <AlertTriangle size={14} className="text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+                                        <div className="flex-1 min-w-0">
+                                          {errorLines.map((line, li) => (
+                                            <p key={li} className="text-xs font-bold text-red-700 dark:text-red-300 whitespace-pre-wrap">
+                                              {line.replace(/^error[:\s]+/i, '')}
+                                            </p>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
                                 </div>
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-sm font-bold text-slate-800 dark:text-slate-200">{step.step}</p>
-                                  <p className="text-sm text-slate-600 mt-1.5 dark:text-slate-400 border-l-2 border-slate-200 dark:border-slate-700 pl-3 py-0.5">{step.result}</p>
-                                </div>
-                              </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         </div>
                       )}
