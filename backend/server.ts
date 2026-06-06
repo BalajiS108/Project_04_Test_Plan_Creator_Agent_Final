@@ -1,3 +1,9 @@
+// Load backend/.env into process.env before anything else reads it. Without
+// this, settings like PER_STEP_MODE=1, MAX_AGENT_TURNS, MAX_HEAL_TURNS, and
+// LLM API keys placed in backend/.env are silently ignored — the backend
+// would only see env vars set explicitly in the shell that launched it.
+import 'dotenv/config';
+
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
@@ -6,7 +12,7 @@ import fs from 'fs';
 import multer from 'multer';
 import mammoth from 'mammoth';
 import * as cheerio from 'cheerio';
-import { runAgent, runAgentParallel, ExecutionReport, ParallelProgress } from './agent.js';
+import { runAgent, runAgentParallel, runAgentPerStep, ExecutionReport, ParallelProgress } from './agent.js';
 import { runAgentWithCodeGeneration } from './run-agent-codegen.js';
 import { healFailedTests } from './healer.js';
 import { applyGuardrails } from './spec-guardrails.js';
@@ -25,6 +31,7 @@ import { listSuites, getSuite, saveSuite, deleteSuite, ApiSuite } from './apiSui
 import {
     isAuthEnabled, authMiddleware, requireAdmin,
     authenticateUser, registerUser, signToken, listUsers, hasAnyUser,
+    deleteUser, countAdmins,
 } from './auth.js';
 import {
     loadConfig as loadCicdConfig,
@@ -39,6 +46,110 @@ import {
 import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/**
+ * Translate a raw Playwright error message into plain English the user can
+ * actually read. Playwright's error blobs include the assertion API name,
+ * locator objects, timing details, and "Call log:" traces — useful for
+ * debugging, unreadable for status reporting. Falls back to a trimmed
+ * version of the raw error when no specific pattern matches.
+ *
+ * Examples:
+ *   "expect(locator).toContainText(expected) failed Locator: locator('[data-test=\"error\"]')
+ *    Expected substring: \"Username and password do not match\"
+ *    Received string: \"Epic sadface: Username is required\" ..."
+ *     → "The test expected the text on [data-test=\"error\"] to contain
+ *        'Username and password do not match' but the app actually showed
+ *        'Epic sadface: Username is required'."
+ */
+const humanizePlaywrightError = (raw: string): string => {
+    if (!raw || typeof raw !== 'string') return raw;
+    const clean = stripAnsi(raw).trim();
+    if (!clean) return '';
+
+    // 1. toContainText / toHaveText assertion mismatch.
+    {
+        const exp = clean.match(/Expected (?:substring|string|pattern):\s*"([^"]+)"/);
+        const got = clean.match(/Received string:\s*"([^"]+)"/);
+        const loc = clean.match(/Locator:\s*locator\('([^']+)'\)/);
+        if (exp && got) {
+            const sel = loc ? ` on the element ${loc[1]}` : '';
+            return `The test expected the text${sel} to contain "${exp[1]}" but the app actually showed "${got[1]}". The expected wording in the test plan does not match what this page renders.`;
+        }
+    }
+
+    // 2. toHaveCount mismatch.
+    {
+        const expCount = clean.match(/Expected:\s*(\d+)\b/);
+        const recCount = clean.match(/Received:\s*(\d+)\b/);
+        const loc = clean.match(/Locator:\s*locator\('([^']+)'\)/);
+        if (expCount && recCount && /toHaveCount/.test(clean)) {
+            return `The test expected ${expCount[1]} element(s) matching ${loc ? loc[1] : 'the selector'} but found ${recCount[1]}.`;
+        }
+    }
+
+    // 3. Strict-mode violation: locator resolved to N elements.
+    {
+        const m = clean.match(/strict mode violation:.*?locator\('([^']+)'\).*?resolved to (\d+) elements/i);
+        if (m) {
+            return `The selector "${m[1]}" matched ${m[2]} elements but the test was targeting a single one. Use .first(), .filter({ hasText: '...' }), or a more specific selector to disambiguate.`;
+        }
+    }
+
+    // 4. toBeVisible / toBeHidden / toBeEnabled / toBeDisabled timeouts.
+    {
+        const matcher = clean.match(/expect\(locator\)\.(toBeVisible|toBeHidden|toBeEnabled|toBeDisabled|toBeChecked)\(/);
+        const loc = clean.match(/Locator:\s*locator\('([^']+)'\)/);
+        const timeout = clean.match(/(?:Timeout|timeout)[\s:]+(\d+)\s*ms/);
+        if (matcher && loc) {
+            const ms = timeout ? ` within ${(parseInt(timeout[1], 10) / 1000).toFixed(0)}s` : '';
+            const want = ({
+                toBeVisible: 'become visible',
+                toBeHidden: 'be hidden',
+                toBeEnabled: 'become enabled',
+                toBeDisabled: 'become disabled',
+                toBeChecked: 'become checked',
+            } as Record<string, string>)[matcher[1]] || matcher[1];
+            return `The test waited for ${loc[1]} to ${want}${ms}, but it never did. The element may not exist on this page, the selector is wrong, or the action that should have caused this state never fired.`;
+        }
+    }
+
+    // 5. locator.click / .fill / .type timeout — element not found or not actionable.
+    {
+        const m = clean.match(/locator\.(click|fill|type|press|check|uncheck|selectOption|hover)[\s\S]*?(?:Test timeout|Timeout)[\s:]+(\d+)\s*ms/);
+        const sel = clean.match(/locator\(['"]([^'"]+)['"]\)/);
+        if (m) {
+            const verb = m[1];
+            const ms = (parseInt(m[2], 10) / 1000).toFixed(0);
+            const where = sel ? ` on ${sel[1]}` : '';
+            return `Could not ${verb}${where} within ${ms} seconds. The element either wasn't on the page, was hidden, or was being intercepted by another element.`;
+        }
+    }
+
+    // 6. Navigation failures.
+    {
+        const m = clean.match(/page\.goto[\s\S]*?(net::[A-Z_]+|TimeoutError)[\s\S]*?(?:url:|at)\s*['"]?(https?:\/\/[^\s'"]+)/);
+        if (m) {
+            const reason = m[1] === 'net::ERR_NAME_NOT_RESOLVED' ? 'the address could not be resolved (check the URL or your network)' :
+                m[1] === 'net::ERR_CONNECTION_REFUSED' ? 'the server refused the connection (it may be down)' :
+                m[1].startsWith('net::') ? `the browser reported "${m[1]}"` :
+                'the page took too long to load';
+            return `Could not load ${m[2]} — ${reason}.`;
+        }
+    }
+
+    // 7. TypeError from bad API usage.
+    {
+        const m = clean.match(/TypeError:\s+(.+?)(?:\n|$)/);
+        if (m) {
+            return `A JavaScript error occurred in the test code: ${m[1]}. The generated script may have used an API incorrectly.`;
+        }
+    }
+
+    // 8. Fallback: first useful line(s), drop the "Call log:" trailer.
+    const firstUseful = clean.split('\n').filter(l => l.trim() && !/^Call log:/i.test(l.trim())).slice(0, 2).join(' ').trim();
+    return firstUseful || clean.slice(0, 200);
+};
 
 // Utility to strip ANSI escape codes for cleaner UI display
 const stripAnsi = (str: string) => {
@@ -284,11 +395,22 @@ app.post('/api/execute', async (req, res) => {
         stopRequested = false;
         partialResults = []; // Reset for new run
 
-        // Pick the right runner. The parallel path is wired through
-        // updateWorkerStatus so each worker keeps its own slot.
+        // Pick the right runner.
+        // - workers > 1   → parallel path (each worker owns its own MCP session)
+        // - DEFAULT       → per-step orchestrator (focused mini-conversation
+        //   per step; far more reliable on long flows than the old legacy
+        //   path). Used to be opt-in via PER_STEP_MODE=1, now it's the default.
+        // - PER_STEP_MODE=legacy in env → opt OUT to the original
+        //   single-conversation runAgent (kept as fallback while we iterate).
+        const useLegacy = (process.env.PER_STEP_MODE || '').toLowerCase() === 'legacy';
+        console.log(useLegacy
+            ? '🏛️  PER_STEP_MODE=legacy — using single-conversation runAgent (fallback path)'
+            : '🧩 Using per-step orchestrator (runAgentPerStep) — set PER_STEP_MODE=legacy to opt out');
         const report: ExecutionReport = workers > 1
             ? await runAgentParallel(testCases, llmConfig, workers, updateWorkerStatus, { autoHeal: !!autoHeal, headed: !!headed })
-            : await runAgent(testCases, llmConfig, updateExecutionStatus, { autoHeal: !!autoHeal, headed: !!headed });
+            : useLegacy
+                ? await runAgent(testCases, llmConfig, updateExecutionStatus, { autoHeal: !!autoHeal, headed: !!headed })
+                : await runAgentPerStep(testCases, llmConfig, updateExecutionStatus, { autoHeal: !!autoHeal, headed: !!headed });
 
         // Generate reports
         const reportPath = await generateExcelReport(report);
@@ -662,11 +784,78 @@ app.post('/api/generate-scripts', async (req, res) => {
         // playwright missing, etc.) we still generate code from the plan alone.
         const pageContext = await inspectUrlsForGeneration(String(testCases), (s) => console.log(s));
 
+        // Site-specific cheatsheet — mirrors the one in agent.ts. Stable demo
+        // sites with deterministic selectors get hardcoded here so the LLM
+        // doesn't have to "discover" them from the live inspection alone
+        // (which can miss elements depending on what the inspector loaded).
+        const tcLower = String(testCases).toLowerCase();
+        let siteCheatsheet = '';
+        if (/saucedemo\.com/.test(tcLower)) {
+            siteCheatsheet = `
+SITE CHEATSHEET — saucedemo.com (USE THESE VERBATIM; DOM is stable):
+
+PAGE LADDER — every selector below lives on EXACTLY ONE page. To use a selector you MUST first execute the navigation click that gets you to its page. There is no exception. If your test asserts a selector for page N without first navigating from page N-1, the test will time out at 15 seconds with "waiting for locator('…')".
+
+  PAGE 1 — / (login)
+    Users:      #user-name, #password, #login-button
+    Error:      [data-test="error"]   (only after a failed login submit)
+    Credentials in plain text on the page:
+      Users:    standard_user / problem_user / performance_glitch_user / error_user / visual_user / locked_out_user
+      Password (all users): secret_sauce
+    NAV: clicking #login-button (with a valid user) goes to PAGE 2.
+
+  PAGE 2 — /inventory.html (after login)
+    Cart icon:        #shopping_cart_container       (a link, not a button)
+    Cart badge:       .shopping_cart_badge           (only appears when cart is non-empty; toHaveText('N'))
+    Add-to-cart:      #add-to-cart-<product-name-lowercased-with-hyphens>
+                       e.g. #add-to-cart-sauce-labs-backpack, #add-to-cart-sauce-labs-bolt-t-shirt,
+                       #add-to-cart-sauce-labs-bike-light, #add-to-cart-sauce-labs-fleece-jacket,
+                       #add-to-cart-sauce-labs-onesie
+    After clicking Add the button is REPLACED by:
+                      #remove-<same-name>            (the original add selector no longer exists)
+    Product names:    .inventory_item_name           (MULTI-MATCH — use .filter({hasText:'X'}) when asserting one)
+    Sort dropdown:    .product_sort_container
+    NAV: clicking #shopping_cart_container → PAGE 3.
+
+  PAGE 3 — /cart.html (only after clicking the cart icon from PAGE 2)
+    Item rows:        .cart_item                     (multi-match — .first() / .filter({hasText:'X'}); .toHaveCount(N) for count)
+    Item names:       [data-test="inventory-item-name"]   (preferred over .cart_item .inventory_item_name)
+    Checkout button:  #checkout                      (LIVES ONLY HERE — clicking from PAGE 2 will time out)
+    Continue Shop:    #continue-shopping             (LIVES ONLY HERE — clicking from PAGE 2 will time out)
+    NAV: clicking #checkout → PAGE 4. Clicking #continue-shopping → back to PAGE 2.
+
+  PAGE 4 — /checkout-step-one.html (only after clicking #checkout from PAGE 3)
+    Form inputs:      #first-name, #last-name, #postal-code
+    Continue:         #continue                      (LIVES ONLY HERE — has no other meaning on other pages)
+    Cancel:           #cancel
+    NAV: filling all three inputs then clicking #continue → PAGE 5.
+
+  PAGE 5 — /checkout-step-two.html (only after clicking #continue from PAGE 4)
+    Summary lines:    .summary_info, .summary_subtotal_label, .summary_tax_label, .summary_total_label
+                      (THESE LIVE ONLY HERE — asserting them from PAGE 3 or earlier WILL time out)
+    Item names:       [data-test="inventory-item-name"]   (still works here, in summary context)
+    Finish:           #finish                        (LIVES ONLY HERE)
+    Cancel:           #cancel
+    NAV: clicking #finish → PAGE 6.
+
+  PAGE 6 — /checkout-complete.html
+    Success text:     "Thank you for your order!"     (visible text)
+    Back home:        #back-to-products              (returns to PAGE 2)
+
+CRITICAL FAILURE PATTERNS LLMs FALL INTO (do NOT do these):
+  ❌ "Verify First Product in Cart" test that asserts .summary_total_label — that's PAGE 5, the test is on PAGE 3.
+  ❌ Test body that clicks #continue-shopping at the top, before any cart navigation — the test is on PAGE 2 (inventory) from beforeEach, the button doesn't exist there.
+  ❌ Test that clicks #finish without first filling the form on PAGE 4 and clicking #continue.
+  ❌ Asserting "Thank you for your order" without going through PAGES 3 → 4 → 5 → 6.
+If you find yourself wanting to do any of the above, the test plan author probably meant something else; assert what's actually visible on the page you're on, or add the navigation steps first.
+`;
+        }
+
         const prompt = `You are a senior QA automation engineer. Convert the following test plan into complete, runnable Playwright TypeScript test scripts.
 
 Test Plan:
 ${testCases}
-${pageContext}
+${pageContext}${siteCheatsheet}
 Requirements:
 - Use Playwright's test framework with \`import { test, expect } from '@playwright/test';\`
 - Each test case in the plan should become a separate \`test()\` block inside a \`test.describe()\` suite
@@ -693,7 +882,17 @@ CRITICAL SELECTOR HYGIENE (these mistakes break tests in subtle ways):
 - BANNED: \`expect(locator).toHaveText('<paraphrased message>')\` for ERROR / TOAST / NOTIFICATION text from the test plan. The plan usually quotes a paraphrase or substring (e.g. "Username and password do not match") but the app renders something longer (e.g. "Epic sadface: Username and password do not match any user in this service"). \`toHaveText\` requires EXACT equality and will fail. Default to substring matching:
   - PREFERRED: \`await expect(page.locator('[data-test="error"]')).toContainText('Username and password do not match');\`
   - Only use \`toHaveText\` when the test plan EXPLICITLY says "exact message: <text>".
-- BANNED: \`expect(page.locator('.cart_item' | '.inventory_item' | '.list-item' | '.row' | '.product' | 'li' | 'tr')).toBeVisible()\`. These class names typically match MULTIPLE elements, and Playwright's locator assertions are strict by default — \`toBeVisible()\` on a multi-match throws "strict mode violation: locator resolved to N elements". Use ONE of these patterns instead:
+- BANNED: asserting an error MESSAGE substring that doesn't match the input the test actually provides. The test plan's Expected Result is often written generically (e.g. "shows an error"), but the app's actual message depends on WHAT field is empty:
+  - Empty username (any state of password) → SauceDemo shows "Epic sadface: Username is required"
+  - Username filled but password empty → "Epic sadface: Password is required"
+  - Both filled, wrong credentials → "Epic sadface: Username and password do not match any user in this service"
+  - Locked-out user → "Epic sadface: Sorry, this user has been locked out."
+  Match the assertion to what the APP actually renders for the input the test provides, NOT to the test plan's generic phrasing.
+  - If the test sets username="" and password="" → assert "Username is required"
+  - If the test sets username="x" and password="" → assert "Password is required"
+  - If the test sets username="bad" and password="bad" → assert "Username and password do not match"
+  - When in doubt about the exact wording, use \`expect(page.locator('[data-test="error"]')).toBeVisible()\` to assert that AN error appears, rather than asserting specific text that may not match.
+- BANNED: \`expect(page.locator('.cart_item' | '.inventory_item' | '.list-item' | '.row' | '.product' | 'li' | 'tr')).toBeVisible()\`. These class names typically match MULTIPLE elements, and Playwright's locator assertions are strict by default — \`toBeVisible()\` on a multi-match throws "strict mode violation: locator resolved to N elements". This ban applies whether the selector is passed as a string literal OR via a variable (e.g. \`const cartItemSelector = '.cart_item'; expect(page.locator(cartItemSelector)).toBeVisible()\` is just as banned as the literal form). Use ONE of these patterns instead:
   - Count assertion (PREFERRED when you know how many items to expect): \`await expect(page.locator('.cart_item')).toHaveCount(2)\`
   - Visibility of any: \`await expect(page.locator('.cart_item').first()).toBeVisible()\`
   - Visibility of specific: \`await expect(page.locator('.cart_item').filter({ hasText: 'Sauce Labs Backpack' })).toBeVisible()\`
@@ -1056,6 +1255,7 @@ app.post('/api/run-playwright', async (req, res) => {
                             else if (status === 'SKIPPED') summary.skipped++;
                             else summary.failed++;
 
+                            const humanError = humanizePlaywrightError(result.error?.message || '');
                             allResults.push({
                                 id: allResults.length + 1,
                                 jiraKey: spec.title.match(/TC-\d+/) ? spec.title.match(/TC-\d+/)[0] : 'TS-1',
@@ -1064,13 +1264,13 @@ app.post('/api/run-playwright', async (req, res) => {
                                 duration: result.duration,
                                 steps: result.steps?.map((step: any) => ({
                                     step: step.title,
-                                    result: step.error ? stripAnsi(step.error?.message || 'Step failed') : 'OK',
+                                    result: step.error ? humanizePlaywrightError(step.error?.message || 'Step failed') : 'OK',
                                     passed: !step.error,
                                     duration: step.duration
                                 })) || [],
                                 expectedResult: 'Test should execute successfully',
-                                error: stripAnsi(result.error?.message || ''),
-                                actualResult: stripAnsi(status === 'PASS' ? 'Test passed successfully' : 'Test failed: ' + (result.error?.message || '')),
+                                error: humanError,
+                                actualResult: status === 'PASS' ? 'Test passed successfully' : (humanError || 'Test failed (no error details available).'),
                                 priority: 'High'
                             });
                         });
@@ -1212,14 +1412,15 @@ app.post('/api/run-playwright', async (req, res) => {
                                     else if (newStatus === 'SKIPPED') summary.skipped++;
                                     else summary.failed++;
                                     // Replace the result row
+                                    const freshHumanError = humanizePlaywrightError(fresh.error?.message || '');
                                     allResults[i] = {
                                         ...r,
                                         status: newStatus,
                                         duration: fresh.duration ?? r.duration,
-                                        error: stripAnsi(fresh.error?.message || ''),
+                                        error: freshHumanError,
                                         actualResult: newStatus === 'PASS'
                                             ? 'Healed: passed after LLM rewrote the failing locators.'
-                                            : `Healing attempted but test still failed: ${fresh.error?.message || ''}`,
+                                            : `Healing attempted but test still failed. ${freshHumanError || ''}`.trim(),
                                         healed: newStatus === 'PASS',
                                         healingFailed: newStatus !== 'PASS',
                                     };
@@ -1352,6 +1553,25 @@ app.get('/api/auth/me', (req, res) => {
 
 app.get('/api/auth/users', requireAdmin, (_req, res) => {
     res.json({ users: listUsers() });
+});
+
+// Delete a user. Admin-only. Two safety rails:
+//  1) Can't delete yourself (would lock you out of the panel mid-action)
+//  2) Can't delete the last admin (would lock out the whole system)
+app.delete('/api/auth/users/:username', requireAdmin, (req, res) => {
+    const target = String(req.params.username || '').trim();
+    if (!target) return res.status(400).json({ error: 'Username required' });
+    if (req.auth?.sub?.toLowerCase() === target.toLowerCase()) {
+        return res.status(400).json({ error: 'You cannot delete your own account from this panel. Sign in as a different admin first.' });
+    }
+    // Only block if the target IS an admin AND it's the last admin.
+    const targetIsAdmin = listUsers().some(u => u.username.toLowerCase() === target.toLowerCase() && u.role === 'admin');
+    if (targetIsAdmin && countAdmins() <= 1) {
+        return res.status(400).json({ error: 'Cannot delete the last remaining admin — promote another user to admin first.' });
+    }
+    const removed = deleteUser(target);
+    if (!removed) return res.status(404).json({ error: `User "${target}" not found` });
+    res.json({ success: true, username: target });
 });
 
 
@@ -2876,7 +3096,24 @@ const PORT = process.env.PORT || 3001;
 app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`\n🚀 Backend server running on http://0.0.0.0:${PORT}`);
     console.log(`📊 Reports will be saved to ./reports/`);
-    console.log(`📹 Videos will be saved to ./videos/\n`);
+    console.log(`📹 Videos will be saved to ./videos/`);
+    // Surface key feature flags at boot so config issues are obvious without
+    // having to fire a request first. If PER_STEP_MODE didn't get set, the
+    // user sees that immediately instead of after a failed test run.
+    console.log(`\n🔧 Backend flags loaded from env:`);
+    const authEnabledLabel = String(process.env.AUTH_ENABLED || '').toLowerCase() === 'true'
+        ? '\x1b[32mON\x1b[0m (login required)'
+        : 'off (no login)';
+    console.log(`   AUTH_ENABLED      = ${authEnabledLabel}`);
+    console.log(`   AUTH_JWT_SECRET   = ${process.env.AUTH_JWT_SECRET ? `<set, ${process.env.AUTH_JWT_SECRET.length} chars>` : '\x1b[33mNOT SET (insecure default will be used)\x1b[0m'}`);
+    const mcpModeLabel = (process.env.PER_STEP_MODE || '').toLowerCase() === 'legacy'
+        ? 'LEGACY (single-conversation runAgent)'
+        : '\x1b[32mPER-STEP orchestrator (default)\x1b[0m';
+    console.log(`   MCP mode          = ${mcpModeLabel}`);
+    console.log(`   MAX_AGENT_TURNS   = ${process.env.MAX_AGENT_TURNS || '30 (default)'}`);
+    console.log(`   MAX_HEAL_TURNS    = ${process.env.MAX_HEAL_TURNS || '8 (default)'}`);
+    console.log(`   MAX_TURNS_PER_STEP= ${process.env.MAX_TURNS_PER_STEP || '6 (default)'}`);
+    console.log('');
 });
 
 // Re-export so other modules in this file can call them if needed

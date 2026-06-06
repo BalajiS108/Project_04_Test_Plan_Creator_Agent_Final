@@ -113,6 +113,26 @@ export function hasAnyUser(): boolean {
     return loadUsers().users.length > 0;
 }
 
+/**
+ * Delete a user by username. Returns true if the user existed and was
+ * removed, false if no such user. Callers should guard against:
+ *   - Deleting the only admin (would lock out the system)
+ *   - Self-deletion (the route handler should reject this)
+ */
+export function deleteUser(username: string): boolean {
+    const file = loadUsers();
+    const idx = file.users.findIndex((u) => u.username.toLowerCase() === username.toLowerCase());
+    if (idx === -1) return false;
+    file.users.splice(idx, 1);
+    saveUsers(file);
+    return true;
+}
+
+/** Count admins — used to block deleting the last admin. */
+export function countAdmins(): number {
+    return loadUsers().users.filter((u) => u.role === 'admin').length;
+}
+
 // Augment the Express Request with an optional `auth` payload so route
 // handlers can access the authenticated user without re-decoding.
 declare global {
