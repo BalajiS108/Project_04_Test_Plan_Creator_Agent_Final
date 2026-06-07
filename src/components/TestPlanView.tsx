@@ -9,6 +9,7 @@ import {
 import { parseTestPlanMarkdown } from '../utils/testPlanParser';
 import { pushTestCases, syncExecutionResults, SyncResultPayload, TestManagementProvider } from '../services/jiraTestSync';
 import { backendUrl as resolveBackendUrl } from '../services/backendUrl';
+import { authHeaders } from '../services/authService';
 
 interface StepResult {
   step: string;
@@ -54,12 +55,168 @@ interface TestPlanViewProps {
   llmConfig: any;
   connection?: any;
   projectKey?: string;
+  // 'plan' = a read-only Standardized Test Plan document (no executable cases);
+  // 'cases' = an executable test-case table. Execution/Jira controls only make
+  // sense for 'cases', so they're hidden in 'plan' mode. Defaults to 'cases'
+  // for backward-compat if a caller omits it.
+  outputType?: 'plan' | 'cases';
   // Opens the Execution History Trends view. Wired from App.tsx so the
   // button lives next to "View HTML Report" instead of in the sidebar.
   onOpenHistory?: () => void;
 }
 
-export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, llmConfig, connection, projectKey, onOpenHistory }) => {
+// ── Lightweight Markdown renderer for the read-only Test Plan view ──────────
+// Handles the subset emitted by TEST_PLAN_GENERATOR_PROMPT: ## / ### headings,
+// **bold**, [links](url), bullet/numbered lists, GFM tables, and horizontal
+// rules. Intentionally dependency-free — react-markdown isn't installed and a
+// full Markdown engine is overkill for our controlled output.
+const renderPlanInline = (text: string, keyPrefix: string): React.ReactNode[] => {
+  const nodes: React.ReactNode[] = [];
+  const regex = /\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)]+)\)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let i = 0;
+  while ((m = regex.exec(text)) !== null) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    if (m[1] !== undefined) {
+      nodes.push(<strong key={`${keyPrefix}-b${i}`} className="font-bold text-slate-800 dark:text-slate-100">{m[1]}</strong>);
+    } else if (m[2] !== undefined) {
+      nodes.push(<a key={`${keyPrefix}-a${i}`} href={m[3]} target="_blank" rel="noreferrer" className="text-blue-600 dark:text-blue-400 underline break-all">{m[2]}</a>);
+    }
+    last = regex.lastIndex;
+    i++;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+};
+
+const renderMarkdownPlan = (md: string): React.ReactNode => {
+  const lines = md.replace(/\r\n/g, '\n').split('\n');
+  const blocks: React.ReactNode[] = [];
+  let i = 0;
+  let key = 0;
+  const isTableRow = (l: string) => /^\s*\|.*\|\s*$/.test(l);
+  const isTableSep = (l: string) => /-/.test(l) && /^\s*\|?[\s:|-]+\|?\s*$/.test(l);
+  const splitRow = (l: string) => l.trim().replace(/^\||\|$/g, '').split('|').map(s => s.trim());
+  const listItemMatch = (l: string) => {
+    const m = l.match(/^(\s*)([-*•]|\d+[.)])\s+(.*)$/);
+    if (!m) return null;
+    return { indent: m[1].replace(/\t/g, '  ').length, ordered: /\d/.test(m[2]), content: m[3] };
+  };
+  const isHeading = (l: string) => /^#{1,6}\s+/.test(l.trim());
+  const isHr = (l: string) => /^(-{3,}|\*{3,}|_{3,})$/.test(l.trim());
+  const isTableHere = (idx: number) => isTableRow(lines[idx]) && idx + 1 < lines.length && isTableSep(lines[idx + 1]);
+  const isBlockStart = (idx: number) => {
+    const l = lines[idx];
+    return isHeading(l) || isHr(l) || !!listItemMatch(l) || isTableHere(idx);
+  };
+  const nextNonBlank = (idx: number) => { while (idx < lines.length && lines[idx].trim() === '') idx++; return idx; };
+
+  // Recursive list builder: consumes items at >= baseIndent, nesting deeper
+  // ones under the preceding item. Skips blank lines between sibling items so
+  // numbering survives the blank-line-separated lists the LLM tends to emit.
+  const buildList = (start: number, baseIndent: number): [React.ReactNode, number] => {
+    const ordered = listItemMatch(lines[start])!.ordered;
+    const items: React.ReactNode[] = [];
+    let idx = start;
+    while (idx < lines.length) {
+      if (lines[idx].trim() === '') {
+        const nb = nextNonBlank(idx);
+        const nbItem = nb < lines.length ? listItemMatch(lines[nb]) : null;
+        if (nbItem && nbItem.indent >= baseIndent) { idx = nb; continue; }
+        break;
+      }
+      const m = listItemMatch(lines[idx]);
+      if (!m || m.indent < baseIndent) break;
+      if (m.indent > baseIndent) break; // safety; deeper items are handled as children below
+      const liKey = items.length;
+      const content = renderPlanInline(m.content, `li${key}-${liKey}`);
+      idx++;
+      // A deeper-indented list immediately after becomes this item's children.
+      let child: React.ReactNode = null;
+      const nb = nextNonBlank(idx);
+      const nbItem = nb < lines.length ? listItemMatch(lines[nb]) : null;
+      if (nbItem && nbItem.indent > baseIndent) {
+        const [childNode, next] = buildList(nb, nbItem.indent);
+        child = childNode;
+        idx = next;
+      }
+      items.push(<li key={liKey} className="text-slate-700 dark:text-slate-300 leading-relaxed">{content}{child}</li>);
+    }
+    const cls = `${ordered ? 'list-decimal' : 'list-disc'} pl-6 space-y-1 my-3`;
+    const node = ordered
+      ? <ol key={key++} className={cls}>{items}</ol>
+      : <ul key={key++} className={cls}>{items}</ul>;
+    return [node, idx];
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (trimmed === '') { i++; continue; }
+
+    if (isHr(line)) { blocks.push(<hr key={key++} className="my-6 border-slate-200 dark:border-slate-700" />); i++; continue; }
+
+    const h = trimmed.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      const level = h[1].length;
+      const content = renderPlanInline(h[2], `h${key}`);
+      if (level <= 2) blocks.push(<h2 key={key++} className="text-xl font-black text-slate-800 dark:text-slate-100 mt-8 mb-3 pb-2 border-b border-slate-200 dark:border-slate-700 first:mt-0">{content}</h2>);
+      else if (level === 3) blocks.push(<h3 key={key++} className="text-base font-bold text-slate-700 dark:text-slate-200 mt-5 mb-2">{content}</h3>);
+      else blocks.push(<h4 key={key++} className="text-sm font-bold text-slate-700 dark:text-slate-200 mt-4 mb-1">{content}</h4>);
+      i++; continue;
+    }
+
+    if (isTableHere(i)) {
+      const header = splitRow(line);
+      i += 2; // skip header + separator
+      const rows: string[][] = [];
+      while (i < lines.length && isTableRow(lines[i])) { rows.push(splitRow(lines[i])); i++; }
+      blocks.push(
+        <div key={key++} className="overflow-x-auto my-4 border border-slate-200 dark:border-slate-700 rounded-xl">
+          <table className="w-full text-left border-collapse text-sm">
+            <thead>
+              <tr className="bg-slate-50 dark:bg-slate-800">
+                {header.map((hc, ci) => <th key={ci} className="p-3 font-bold text-slate-600 dark:text-slate-300 border-b border-slate-200 dark:border-slate-700 border-r last:border-r-0">{renderPlanInline(hc, `th${key}-${ci}`)}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, ri) => (
+                <tr key={ri} className="border-b border-slate-100 dark:border-slate-800 last:border-0">
+                  {r.map((c, ci) => <td key={ci} className="p-3 align-top text-slate-700 dark:text-slate-300 border-r border-slate-100 dark:border-slate-800 last:border-r-0">{renderPlanInline(c, `td${key}-${ri}-${ci}`)}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+      continue;
+    }
+
+    if (listItemMatch(line)) {
+      const [node, next] = buildList(i, listItemMatch(line)!.indent);
+      blocks.push(node);
+      i = next;
+      continue;
+    }
+
+    // Paragraph — accumulate consecutive plain lines until the next block.
+    const para: string[] = [];
+    while (i < lines.length && lines[i].trim() !== '' && !isBlockStart(i)) {
+      para.push(lines[i].trim());
+      i++;
+    }
+    if (para.length) blocks.push(<p key={key++} className="text-slate-700 dark:text-slate-300 leading-relaxed my-2">{renderPlanInline(para.join(' '), `p${key}`)}</p>);
+  }
+  return <div className="relative z-10 w-full">{blocks}</div>;
+};
+
+export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, llmConfig, connection, projectKey, outputType = 'cases', onOpenHistory }) => {
+  // Execution (MCP/Script run, auto-heal, Jira push/sync, saved specs) is only
+  // meaningful for an executable test-case table. A test PLAN is a read-only
+  // document, so all that chrome is hidden in plan mode.
+  const isCasesMode = outputType === 'cases';
   const [isExecuting, setIsExecuting] = useState(false);
   const [report, setReport] = useState<ExecutionReport | null>(null);
   const [executionError, setExecutionError] = useState<string | null>(null);
@@ -437,7 +594,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
 
     statusIntervalRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`${backendUrl}/api/execution-status`);
+        const res = await fetch(`${backendUrl}/api/execution-status`, { headers: { ...authHeaders() } });
         const data = await res.json();
         if (data.isRunning) {
           setExecutionProgress({
@@ -470,7 +627,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
         setExecutionProgress({ currentCase: 'Generating Playwright script from current plan…', progress: 0, total: 0, action: 'Asking the LLM to write the test code' });
         const genRes = await fetch(`${backendUrl}/api/generate-scripts`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({ testCases: plan, llmConfig, productName }),
         });
         const genData = await genRes.json();
@@ -489,7 +646,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
         setExecutionProgress({ currentCase: `Running ${genData.filePath || scriptDisplay}`, progress: 0, total: 0, action: `npx playwright test ${genData.filePath || scriptDisplay}` });
         const runRes = await fetch(`${backendUrl}/api/run-playwright`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({
             scriptPath: scriptToRun,
             headed: headedMode,
@@ -517,7 +674,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
         // MCP mode: live agent-driven execution
         const response = await fetch(`${backendUrl}/api/execute`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({
             testCases: plan,
             llmConfig,
@@ -577,7 +734,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
   const statusIntervalRef = React.useRef<any>(null);
 
   const fetchScriptLibrary = async () => {
-    const res = await fetch(`${resolveBackendUrl()}/api/list-scripts`);
+    const res = await fetch(`${resolveBackendUrl()}/api/list-scripts`, { headers: { ...authHeaders() } });
     const data = await res.json();
     setScriptLibrary(data.scripts || []);
   };
@@ -616,7 +773,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
 
     statusIntervalRef.current = setInterval(async () => {
       try {
-        const r = await fetch(`${backendUrl}/api/execution-status`);
+        const r = await fetch(`${backendUrl}/api/execution-status`, { headers: { ...authHeaders() } });
         const d = await r.json();
         if (d.isRunning) {
           setExecutionProgress({
@@ -634,7 +791,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
     try {
       const res = await fetch(`${backendUrl}/api/run-playwright`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ scriptPath, headed: headedMode, autoHeal: autoHealEnabled, llmConfig })
       });
       const data = await res.json();
@@ -664,7 +821,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
       const backendUrl = resolveBackendUrl();
 
       // 1. Signal backend to stop (kills both MCP and script-mode processes)
-      await fetch(`${backendUrl}/api/stop`, { method: 'POST' });
+      await fetch(`${backendUrl}/api/stop`, { method: 'POST', headers: { ...authHeaders() } });
       setIsExecuting(false);
       setRunningScript(null);
       setExecutionProgress({ currentCase: 'Stopping... fetching partial results', progress: 0, total: 0, action: 'Stopping...' });
@@ -673,7 +830,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
       await new Promise(r => setTimeout(r, 800));
 
       // 3. Fetch whatever completed so far
-      const partialRes = await fetch(`${backendUrl}/api/partial-results`);
+      const partialRes = await fetch(`${backendUrl}/api/partial-results`, { headers: { ...authHeaders() } });
       const partialData = await partialRes.json();
 
       if (partialData.hasResults) {
@@ -731,7 +888,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
     try {
       const res = await fetch(`${backendUrl}/api/jira/create-bug`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ connection, projectKey: effectiveProjectKey, testCase: tc })
       });
       const data = await res.json();
@@ -855,7 +1012,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
       <div className="flex justify-between items-center mb-10">
         <div>
           <h2 className="text-3xl font-bold text-slate-800 tracking-tight dark:text-slate-100">
-            {report ? (isPartialReport ? '⏸ Partial Execution Report' : 'Execution Report') : 'Standardized Test Plan'}
+            {report ? (isPartialReport ? '⏸ Partial Execution Report' : 'Execution Report') : (isCasesMode ? 'Generated Test Cases' : 'Standardized Test Plan')}
           </h2>
           <p className="text-slate-500 font-medium tracking-wide dark:text-slate-400">Product: {productName || 'Default Project'}</p>
         </div>
@@ -874,6 +1031,9 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
             <Download size={14} />
             Download MD
           </button>
+          {/* Execution + Jira controls — only for an executable test-case table.
+              Hidden entirely when viewing a read-only Standardized Test Plan. */}
+          {isCasesMode && (<>
           {/* Execution Mode Toggle (MCP Mode / Playwright Script Mode) */}
           <div
             className="inline-flex items-center rounded-xl border border-slate-200 bg-white p-1 shadow-sm dark:border-slate-700 dark:bg-slate-800"
@@ -1087,6 +1247,7 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
               {linkedCount} linked
             </span>
           )}
+          </>)}
         </div>
       </div>
 
@@ -1863,7 +2024,9 @@ export const TestPlanView: React.FC<TestPlanViewProps> = ({ plan, productName, l
               <p className="font-black uppercase tracking-widest text-xs">Generating Plan...</p>
             </div>
           ) : (
-            renderPlanContent(plan)
+            // Plan mode → proper Markdown (headings, tables, lists). Cases mode →
+            // the test-case table renderer (detects the single | table).
+            isCasesMode ? renderPlanContent(plan) : renderMarkdownPlan(plan)
           )}
         </div>
       )}

@@ -27,6 +27,18 @@ export const applyAuthToken = (token: string | null) => {
   }
 };
 
+/**
+ * Auth header for raw `fetch()` calls. Axios picks up the default header set by
+ * applyAuthToken automatically, but plain fetch (used in TestPlanView for the
+ * execute/run/stop endpoints) does not — so it must attach the token itself.
+ * Returns an empty object when no token is stored, which is harmless when auth
+ * is disabled on the backend.
+ */
+export const authHeaders = (): Record<string, string> => {
+  const token = localStorage.getItem(TOKEN_KEY);
+  return token ? { Authorization: `Bearer ${token}` } : {};
+};
+
 export const fetchAuthStatus = async (): Promise<AuthStatus> => {
   const res = await axios.get(`${backendUrl()}/api/auth/status`, { timeout: 10000 });
   return res.data;

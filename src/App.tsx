@@ -572,6 +572,7 @@ function App() {
                     llmConfig={llmConfig}
                     connection={activeConnection}
                     projectKey={projectKey}
+                    outputType={outputType}
                     onOpenHistory={() => setView('history')}
                   />
                 </div>

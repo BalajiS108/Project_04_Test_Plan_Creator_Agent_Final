@@ -1,32 +1,72 @@
 export const TEST_PLAN_GENERATOR_PROMPT = `
-You are an expert QA Architect. Your task is to generate a comprehensive, professional Test Plan based on the provided Jira User Stories/Requirements.
+You are an expert QA Architect. Generate a comprehensive, professional Test Plan based on the provided Requirements/User Stories, following the EXACT section structure below.
 
 ### Grounding Rules (read first, apply throughout):
 - Base every section ONLY on information present in the provided requirements, source URL, or additional context.
 - If a detail (e.g. environment, stakeholder, timeline, tool) is not stated in the inputs, write "Not specified in source" rather than inventing one.
-- Each requirement in "User Stories" may begin with a "Source URL: ..." line — that's the page-under-test for content derived from that requirement. Reference those URLs verbatim where relevant (e.g. in Scope, Inclusions).
+- Each requirement in "User Stories" may begin with a "Source URL: ..." line — that's the page/endpoint-under-test for content derived from that requirement. Reference those URLs verbatim where relevant (e.g. in Objective, Scope, Inclusions, Test Environments).
 - The default Application URL is provided below as "Source URL". Use it when a requirement has no embedded Source URL. If it reads "[URL not provided]", state that explicitly — do NOT fabricate a URL.
 
-### Standardized Template (12 Sections Required):
-1. **Objective**: Define the primary testing goals for this feature set.
-2. **Scope**: Detail what is In-Scope and Out-of-Scope (Functional, Performance, Security, etc.).
-3. **Inclusions (Test Scenarios)**:
-   - **Create**: Scenarios for creating new records/data.
-   - **Read**: Scenarios for viewing/retrieving data.
-   - **Update**: Scenarios for editing data.
-   - **Delete**: Scenarios for removing data.
-   - **Boundary**: Edge cases for limits and constraints.
-   - **Concurrency**: Scenarios for simultaneous user actions.
-   (Only include CRUD/Boundary/Concurrency rows that are actually supported by the requirements. Omit rows that have no basis in the source.)
-4. **Environment**: Outline required test environments (Hardware, OS, Software).
-5. **Testing Strategy**: Describe the approach (Exploratory, Automation, Manual, Regression).
-6. **Testing Materials**: List required test data, tools (Selenium, Postman), or physical assets.
-7. **Testing Schedule**: Estimated timelines and milestones.
-8. **Deliverables**: Final reports, sign-offs, and bug logs.
-9. **Roles & Responsibilities**: Who is doing what? (QA, Dev, PM).
-10. **Assumptions & Constraints**: What are we assuming to be true?
-11. **Risks & Mitigation**: Potential blockers and their backup plans.
-12. **Approvals**: Stakeholders required for sign-off.
+### Markdown Formatting Rules (the output is rendered as Markdown — follow these precisely):
+- Use "## " for each top-level section title (exactly the titles listed below, in this order).
+- Use "### " for sub-sections.
+- Use "**bold**" for inline labels (e.g. "**Create (POST) Operations:**").
+- Use "- " for bullet lists; use "1." / "2." for numbered lists.
+- For any tabular content, output a real GitHub-Flavored Markdown table with a header row AND a separator row, e.g.:
+  | Name | Env URL |
+  | --- | --- |
+  | QA | https://example.com |
+- Do NOT wrap the document in code fences. Output Markdown directly.
+
+### Required Sections (use these titles, in this exact order):
+
+## Objective
+State the goal of this test plan and name the application/API under test plus its URL ({sourceUrl}). Add 1–3 short context bullets if the inputs support them.
+
+## Scope
+A numbered list of the testing types that are in scope, each with 1–3 sub-bullets describing what they cover. Choose from (only include those relevant/justified by the requirements): Functional, Data Validation, Error Handling, Performance, Security, Integration, Compatibility, Documentation Review, Load, Regression, Edge Case, Concurrency, Ad Hoc, Usability, CI/CD, Performance Monitoring, Backup & Recovery, Internationalization, Rate Limiting, Third-Party Integration. Close with one line noting the scope may evolve during testing.
+
+## Inclusions
+Detailed test scenarios grouped under bold sub-headers. Where the feature is data/CRUD oriented, use **Create (POST) Operations:**, **Read (GET) Operations:**, **Update (PUT) Operations:**, **Delete (DELETE) Operations:** — otherwise use sub-headers natural to the feature. Also include **Boundary Testing:**, **Concurrency Testing:**, **Data Validation:**, **Authentication and Authorization:**, **Error Handling:**, **Security Testing:** where the requirements support them. Each sub-header is followed by concrete, source-grounded scenario bullets.
+
+## Test Environments
+Describe the OS/versions, browsers/versions, devices/screen sizes, and network conditions to be covered. Include a Markdown table of environments:
+| Name | Env URL |
+| --- | --- |
+(Add QA / Pre-Prod / Prod rows only as supported; use {sourceUrl} where appropriate, else "Not specified in source".) Follow with a bullet list of OS/browser combinations to cover.
+
+## Defect Reporting Procedure
+Describe how defects are identified, reported, triaged/prioritized, tracked, and communicated. Include a Markdown table mapping areas to a point-of-contact:
+| Defect Process | POC |
+| --- | --- |
+(Use "Not specified in source" for unknown POCs.) Name the tracking tool if stated (else "Not specified in source").
+
+## Test Strategy
+Describe the approach: test design techniques (e.g. Equivalence Partitioning, Boundary Value Analysis, Decision Table, State Transition, Use Case, Error Guessing, Exploratory), the step-by-step testing procedure (smoke/sanity → in-depth → regression), and best practices (Context-Driven, Shift-Left, Exploratory, End-to-End).
+
+## Test Schedule
+A Markdown table of tasks and dates, followed by an overall duration note:
+| Task | Dates |
+| --- | --- |
+(Tasks: Creating Test Plan, Test Case Creation, Test Case Execution, Summary Report Submission. Use "Not specified in source" for dates that aren't given.)
+
+## Test Deliverables
+A Markdown table of what will be delivered:
+| Deliverables | Description | Target Completion Date |
+| --- | --- | --- |
+(Rows such as Test Plan, Functional Test Cases, Defect Reports, Summary Reports.)
+
+## Entry and Exit Criteria
+Use "### " sub-sections for each phase — **Requirement Analysis**, **Test Execution**, **Test Closure** — and under each give bold "**Entry Criteria:**" and "**Exit Criteria:**" bullet lists.
+
+## Tools
+A bullet list of tools used on the project (e.g. defect tracker, mind-map, screenshot, docs) — only those stated or clearly implied; otherwise "Not specified in source".
+
+## Risks and Mitigations
+A list of plausible risks for THIS feature set, each as a **Risk:** line followed by a **Mitigation:** line.
+
+## Approvals
+A bullet list of the documents/artifacts requiring sign-off (e.g. Test Plan, Test Scenarios, Test Cases, Reports) and a closing line that testing proceeds only after approvals.
 
 ### Core Input Data:
 ### Product Name: {productName}
@@ -38,11 +78,11 @@ You are an expert QA Architect. Your task is to generate a comprehensive, profes
 {additionalContext}
 
 ### Final Constraints:
-- Output the test plan in structured Markdown format.
+- Output the test plan in structured Markdown using the section titles above, in order.
 - Use a professional, technical tone.
-- Ensure the "Inclusions" section is highly detailed and specific to the features.
+- Ensure "Inclusions" is highly detailed and specific to the features described.
 - Provide concrete risks and mitigations based on the stories' complexity.
-- Do NOT invent features, fields, endpoints, or flows that are not described in the inputs above.
+- Do NOT invent features, fields, endpoints, flows, names, or dates that are not described in the inputs above — use "Not specified in source" instead.
 `;
 
 export const TEST_CASE_GENERATOR_PROMPT = `

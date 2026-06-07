@@ -201,8 +201,16 @@ app.use((req, _res, next) => {
     next();
 });
 
-// Auth gate — opt-in via AUTH_ENABLED env var. When off, this is a no-op.
-app.use(authMiddleware);
+// Generated artifacts (downloadable reports, recorded videos, Playwright HTML
+// reports, visual-audit images) are served as static files BEFORE the auth
+// gate. They're reached via direct browser navigation — <a href>, new tab,
+// download — which cannot attach the Bearer token; and the Playwright HTML
+// report pulls its own sub-resources via relative URLs that likewise wouldn't
+// carry a token. Keeping them ahead of authMiddleware is what makes
+// "View HTML Report" / "Export Excel" work when AUTH_ENABLED is on. These
+// directories hold only generated test output, not credentials or user data.
+const htmlReportsDir = path.join(projectRoot, 'html-reports');
+if (!fs.existsSync(htmlReportsDir)) fs.mkdirSync(htmlReportsDir, { recursive: true });
 
 // Serve generated reports for download
 app.use('/reports', express.static(reportsDir));
@@ -210,14 +218,17 @@ app.use('/reports', express.static(reportsDir));
 // Serve recorded test execution videos
 app.use('/videos', express.static(videosDir));
 
-const htmlReportsDir = path.join(projectRoot, 'html-reports');
-if (!fs.existsSync(htmlReportsDir)) fs.mkdirSync(htmlReportsDir, { recursive: true });
+// Serve Playwright HTML reports (multi-file: index.html + relative assets)
 app.use('/html-reports', express.static(htmlReportsDir));
 
 // Visual-regression baseline + diff PNGs are served so the frontend can show
 // them inline in the audit panel.
 app.use('/audit-images/baselines', express.static(BASELINE_DIR));
 app.use('/audit-images/diffs', express.static(DIFF_DIR));
+
+// Auth gate — opt-in via AUTH_ENABLED env var. When off, this is a no-op.
+// Everything below this line requires a valid Bearer token (when enabled).
+app.use(authMiddleware);
 
 // Progress Tracking
 interface WorkerSlot {
