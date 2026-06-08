@@ -2795,6 +2795,15 @@ ACT — choose the tool that matches the element TYPE:
   • Element inside an iframe → pass iframe="<iframe css>" on the tool.
   • A cookie/consent/modal/overlay banner blocking interaction → discover and dismiss it (Accept/Close) FIRST, then retry the real action.
 
+VAGUE "fill the details" steps ("give necessary details", "fill all suitable details", "fill the form", "provide the required information", "complete the form"):
+- DEEP-SCAN FIRST: call playwright_get_input_fields — it maps EVERY field and flags each "*REQUIRED" one, lists <select> options, and shows checkbox/radio state and which are still empty.
+- Then fill EVERYTHING the form needs to advance, not only the values named in the step:
+   · For each field whose label matches the Test Data / step, use that exact value.
+   · For every OTHER *REQUIRED field that is still empty, supply a clearly valid, realistic value (e.g. a required phone → a valid-format number; a required address → a plausible one). Prefer values consistent with any country/context the step specified.
+   · Required <select> → playwright_select_option with one of the listed options. Required checkbox/radio (e.g. consent, "I agree") → playwright_check.
+- RE-SCAN with playwright_get_input_fields before moving on and confirm "0 required & still empty". Do NOT click Continue/Next/Review while required fields remain empty — that's what makes the next step fail.
+- Use playwright_fill_form or playwright_smart_fill_page to fill many fields in one call when labels are clear.
+
 CONFIRM — prove the action took effect (re-read the value, the visible text, or wait_for_selector for what should appear next):
 - After navigation or a click that loads new content, call playwright_wait_for_selector for an element you expect on the new state BEFORE the next action.
 - If nothing changed, your selector was wrong: RE-DISCOVER (observe again) and try a different selector. NEVER repeat the same selector more than twice.

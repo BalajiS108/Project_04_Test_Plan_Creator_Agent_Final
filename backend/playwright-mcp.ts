@@ -723,19 +723,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 const target = await getTargetFrame(args.iframe as string | undefined);
                 const fields = await target.evaluate(() => {
                     const results: any[] = [];
-                    // Inputs and textareas
-                    document.querySelectorAll('input, textarea, select, button, [role="button"]').forEach((el, idx) => {
+                    // Include ARIA widgets (custom checkboxes/radios/comboboxes) too.
+                    document.querySelectorAll('input, textarea, select, button, [role="button"], [role="checkbox"], [role="radio"], [role="combobox"], [role="switch"]').forEach((el, idx) => {
                         const htmlEl = el as HTMLElement;
                         if (htmlEl.offsetParent === null && htmlEl.getAttribute('type') !== 'hidden') return; // skip hidden
 
                         const tag = el.tagName.toLowerCase();
-                        const type = el.getAttribute('type') || tag;
+                        const role = el.getAttribute('role') || '';
+                        const type = el.getAttribute('type') || (tag === 'select' ? 'select' : tag);
                         const name = el.getAttribute('name') || '';
                         const id = el.getAttribute('id') || '';
                         const placeholder = el.getAttribute('placeholder') || '';
                         const ariaLabel = el.getAttribute('aria-label') || '';
                         const value = (el as HTMLInputElement).value || '';
-                        const text = tag === 'button' || el.getAttribute('role') === 'button' ? htmlEl.innerText.trim() : '';
+                        const text = tag === 'button' || role === 'button' ? htmlEl.innerText.trim().slice(0, 60) : '';
+
+                        // Required? (native attr OR aria-required)
+                        const required = (el as HTMLInputElement).required || el.getAttribute('aria-required') === 'true';
+                        // Checkbox / radio / switch state
+                        const isToggle = type === 'checkbox' || type === 'radio' || role === 'checkbox' || role === 'radio' || role === 'switch';
+                        const checked = isToggle ? (!!(el as HTMLInputElement).checked || el.getAttribute('aria-checked') === 'true') : undefined;
+                        // <select> options so the agent knows valid choices
+                        let options: string[] | undefined;
+                        if (tag === 'select') {
+                            options = Array.from((el as HTMLSelectElement).options).map(o => o.text.trim()).filter(Boolean).slice(0, 40);
+                        }
 
                         // Find associated label
                         let label = '';
@@ -747,6 +759,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                             const parent = el.closest('label');
                             if (parent) label = (parent as HTMLElement).innerText.trim();
                         }
+                        label = label.slice(0, 80);
 
                         // Build a good selector
                         let selector = '';
@@ -756,21 +769,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         else if (ariaLabel) selector = `${tag}[aria-label="${ariaLabel}"]`;
                         else selector = `${tag}:nth-of-type(${idx + 1})`;
 
-                        results.push({ tag, type, name, id, placeholder, ariaLabel, label, value, text, selector });
+                        results.push({ tag, type, name, id, placeholder, ariaLabel, label, value, text, required, checked, options, selector });
                     });
                     return results;
                 });
 
                 const summary = fields.map((f: any) => {
-                    const parts = [`[${f.type}]`, f.selector];
+                    const parts = [`[${f.type}${f.required ? ' *REQUIRED' : ''}]`, f.selector];
                     if (f.label) parts.push(`label="${f.label}"`);
-                    if (f.placeholder) parts.push(`placeholder="${f.placeholder}"`);
+                    else if (f.placeholder) parts.push(`placeholder="${f.placeholder}"`);
+                    else if (f.ariaLabel) parts.push(`aria="${f.ariaLabel}"`);
                     if (f.text) parts.push(`text="${f.text}"`);
+                    if (f.options) parts.push(`options=[${f.options.join(' | ')}]`);
+                    if (f.checked !== undefined) parts.push(`checked=${f.checked}`);
                     if (f.value) parts.push(`value="${f.value}"`);
                     return parts.join(' | ');
                 }).join('\n');
 
-                return { content: [{ type: "text", text: `Found ${fields.length} interactive elements:\n${summary}` }] };
+                const requiredEmpty = fields.filter((f: any) => f.required && !f.value && f.checked === undefined).length;
+                return { content: [{ type: "text", text: `Found ${fields.length} interactive elements (${requiredEmpty} required & still empty):\n${summary}` }] };
             }
 
             case "playwright_evaluate": {
