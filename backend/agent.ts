@@ -2604,6 +2604,38 @@ SITE CHEATSHEET — saucedemo.com (DOM is stable; USE THESE VERBATIM):
         }
         return null;
     })();
+    const evaluateToolName = (() => {
+        for (const name of ['playwright_evaluate', 'browser_evaluate']) {
+            if (mcpTools.some(t => t.name === name)) return name;
+        }
+        return null;
+    })();
+
+    // Best-effort, site-agnostic cookie/consent banner dismissal. These banners
+    // overlay the page and intercept clicks (the #1 cause of "could not locate
+    // element" on the first interaction). Only clicks a control whose text is an
+    // unambiguous consent acceptor, so it won't click unrelated buttons. Returns
+    // what it clicked (or null). Safe to call repeatedly.
+    const dismissConsentBanner = async (): Promise<string | null> => {
+        if (!evaluateToolName) return null;
+        const script = [
+            "var ids=['onetrust-accept-btn-handler','truste-consent-button','accept-recommended-btn-handler','CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll'];",
+            "for (var i=0;i<ids.length;i++){var el=document.getElementById(ids[i]); if(el){el.click(); return 'id:'+ids[i];}}",
+            "var ok=['accept all cookies','accept all','accept cookies','i accept','i agree','agree and close','allow all cookies','allow all','accept'];",
+            "var nodes=Array.from(document.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]'));",
+            "for (var j=0;j<nodes.length;j++){var n=nodes[j];var r=n.getBoundingClientRect();var s=getComputedStyle(n); if(r.width<=0||r.height<=0||s.visibility==='hidden'||s.display==='none')continue; var t=(n.textContent||n.value||'').trim().toLowerCase(); if(ok.indexOf(t)!==-1){n.click(); return 'text:'+t;}}",
+            "return null;",
+        ].join('');
+        try {
+            const r = await client.callTool({ name: evaluateToolName, arguments: { script } }).catch(() => null);
+            const t = (r?.content as any)?.[0]?.text;
+            if (t && t !== 'null' && t !== '"null"') {
+                console.log(`     🍪 Dismissed consent banner (${t}).`);
+                return String(t);
+            }
+        } catch { /* best effort */ }
+        return null;
+    };
     const videoStartTool = mcpTools.some(t => t.name === 'playwright_start_recording') ? 'playwright_start_recording' : null;
     const videoStopTool = mcpTools.some(t => t.name === 'playwright_stop_recording') ? 'playwright_stop_recording' : null;
     console.log(`🔎 Per-step session ready — ${mcpTools.length} tools available. Snapshot tool: ${snapshotToolName ?? '(none)'}, video: ${videoStartTool ? 'on' : 'off'}.`);
@@ -2679,15 +2711,22 @@ SITE CHEATSHEET — saucedemo.com (DOM is stable; USE THESE VERBATIM):
 
             // Capture current page state for context. Best-effort — if the
             // browser hasn't navigated yet (step 1), we get a blank snapshot.
-            let pageSnapshot = '';
-            if (snapshotToolName) {
+            const readSnapshot = async (): Promise<string> => {
+                if (!snapshotToolName) return '';
                 try {
                     const visRes = await client.callTool({ name: snapshotToolName, arguments: {} }).catch(() => null);
-                    if (visRes) {
-                        const txt = (visRes.content as any)?.[0]?.text;
-                        if (typeof txt === 'string') pageSnapshot = txt.slice(0, 1500);
-                    }
-                } catch { /* page state is optional context */ }
+                    const txt = (visRes?.content as any)?.[0]?.text;
+                    return typeof txt === 'string' ? txt.slice(0, 1500) : '';
+                } catch { return ''; }
+            };
+            let pageSnapshot = await readSnapshot();
+
+            // If a cookie/consent banner is overlaying the page, dismiss it BEFORE
+            // the agent tries to interact — otherwise it intercepts clicks and the
+            // step fails with "could not locate element". Re-snapshot afterward.
+            if (/\b(cookie|consent|privacy policy|gdpr)\b/i.test(pageSnapshot)) {
+                const dismissed = await dismissConsentBanner();
+                if (dismissed) pageSnapshot = await readSnapshot();
             }
 
             // Brief summary of what previous steps accomplished, so the LLM
@@ -2934,6 +2973,34 @@ Step ${stepNum} of ${tc.steps.length}: ${stepText}`;
                 }
                 resultDetails = `⚠ No browser action was performed for this step within the ${MAX_TURNS_PER_STEP}-turn budget — the agent likely could not locate the element for: "${stepText.slice(0, 90)}". Check the element exists / reword the step.${ctx}`;
                 passed = false;
+            }
+
+            // OUTCOME CHECK (catches false passes like "login succeeded" when it
+            // didn't): for a step that should TRANSITION the page (login / sign in
+            // / submit / continue / next / pay / etc.), if a NEW error/validation
+            // message appears that wasn't on the page before the step, the action
+            // did not actually succeed — flip PASS to FAIL. Kept tight + diff-based
+            // (only NEW text) so it won't false-fail normal steps.
+            if (passed && realActions.length > 0 && /\b(log\s?in|sign\s?in|log\s?on|submit|continue|next|proceed|pay|checkout|review my donation|place order)\b/i.test(stepText)) {
+                const afterText = await readSnapshot();
+                const before = pageSnapshot.toLowerCase();
+                const after = afterText.toLowerCase();
+                // Auth/submit-FAILURE phrases only — deliberately tight so a
+                // legitimately successful transition isn't false-failed by generic
+                // form wording (e.g. "all fields are required").
+                const errorSignals = [
+                    'incorrect', 'invalid', 'do not match', 'does not match', "doesn't match",
+                    'unable to sign', 'could not sign', 'unable to log', 'wrong password',
+                    'wrong username', 'not recognized', 'authentication failed', 'login failed',
+                    'sign-in failed', 'session expired', 'please try again',
+                ];
+                const newError = errorSignals.find(p => after.includes(p) && !before.includes(p));
+                if (newError) {
+                    const snippet = afterText.replace(/\s+/g, ' ').trim().slice(0, 300);
+                    resultDetails = `❌ Action ran but the page shows an error — the step did NOT actually succeed (matched "${newError}"). Page now: ${snippet}`;
+                    passed = false;
+                    console.log(`     ✗ Outcome check failed for step ${stepNum}: new error signal "${newError}".`);
+                }
             }
 
             stepResults.push({ step: `Step ${stepNum}: ${stepText}`, result: resultDetails, passed });
