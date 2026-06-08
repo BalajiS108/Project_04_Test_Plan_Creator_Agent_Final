@@ -88,11 +88,16 @@ A bullet list of the documents/artifacts requiring sign-off (e.g. Test Plan, Tes
 export const TEST_CASE_GENERATOR_PROMPT = `
 You are an expert QA Engineer. Your task is to generate up to FIVE (5) comprehensive, professional Test Cases based on the provided Jira User Stories/Requirements.
 
-### Grounding Rules (read first, apply throughout):
+### Read the story carefully FIRST (do this before writing anything):
+- Read EVERY part of each User Story: the Summary, the full Description, acceptance criteria, steps, bullet lists, tables, example data, and any URLs.
+- Extract the concrete facts the tests must use: the application URL(s), credentials/sample data, field names, button/label text, validation rules, error messages, and the exact expected behaviors. Reuse these VERBATIM — do not paraphrase identifiers the test must match.
+- The story text may contain the application URL inline (a plain URL, a hyperlink, or a smart-link). Treat any http(s) URL found in the story as the application-under-test URL when no explicit "Source URL" is given.
+
+### Grounding Rules (apply throughout):
 - Each test case MUST trace back to behavior explicitly described in the User Stories or Additional Context below.
 - Do NOT invent features, fields, buttons, endpoints, error messages, or flows that are not present in the inputs.
 - If the inputs only support 2 or 3 distinct test cases, produce only 2 or 3 — do not pad with fabricated scenarios.
-- The Application URL is provided below as "Source URL". Use it verbatim in the Preconditions column. If it reads "[URL not provided]", write "[URL not provided]" in Preconditions — do NOT make one up.
+- The Application URL is provided below as "Source URL". Use it verbatim in the Preconditions column. If "Source URL" reads "[URL not provided]" BUT the story text contains a URL, use the URL from the story. Only when NO URL exists anywhere should you write "[URL not provided]" — never make one up.
 - Only include a "Login" step if the source requirements mention authentication. If the source has no login flow, skip it.
 
 ### Standardized Template:
@@ -105,7 +110,8 @@ The Markdown Table MUST have exactly these columns:
 PRECONDITIONS COLUMN — per-test URL handling:
 - Each requirement in "User Stories" below MAY begin with a line like "Source URL: https://...". If present, that URL is the page-under-test for any case derived from THAT requirement — use it verbatim in the Preconditions.
 - If a requirement has no "Source URL:" line, fall back to the default Source URL provided just below ({sourceUrl}).
-- If both are absent / "[URL not provided]", write the preconditions without inventing a URL.
+- If the default Source URL is "[URL not provided]", use any http(s) URL that appears in that requirement's text instead.
+- Only if there is genuinely no URL anywhere (default or in the story) should you write the preconditions without a URL — never invent one.
 - Format: "User is on <the resolved URL for this test> with [optional preconditions]"
 
 TEST DATA COLUMN (read carefully — this is where hallucination usually happens):

@@ -19,7 +19,17 @@ export const generateTestPlanResult = async (
 
   const basePrompt = outputType === 'cases' ? TEST_CASE_GENERATOR_PROMPT : TEST_PLAN_GENERATOR_PROMPT;
 
-  const resolvedSourceUrl = sourceUrl.trim() || '[URL not provided]';
+  // Source URL priority: explicit Application URL (Step 3) wins; otherwise try
+  // to detect one from the story text itself. Jira authors usually paste the
+  // app-under-test URL into the description — once jiraDescriptionToText surfaces
+  // it (incl. hyperlink/smart-link hrefs), this picks it up so test cases get a
+  // real target instead of "[URL not provided]" (which made execution navigate
+  // nowhere and every case fail).
+  const detectUrl = (text: string): string => {
+    const m = text.match(/https?:\/\/[^\s)"'<>\]]+/);
+    return m ? m[0].replace(/[.,;:]+$/, '') : '';
+  };
+  const resolvedSourceUrl = sourceUrl.trim() || detectUrl(jiraContext) || '[URL not provided]';
 
   const fullPrompt = basePrompt
     .replaceAll('{productName}', productName)

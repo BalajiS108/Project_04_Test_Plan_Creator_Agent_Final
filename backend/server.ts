@@ -1615,6 +1615,77 @@ app.get('/api/execution-status', (_req, res) => {
 });
 
 // Jira Proxy to bypass CORS
+// ── Jira ADF → plain text ────────────────────────────────────────────────
+// Jira Cloud's REST v3 returns issue descriptions as ADF (Atlassian Document
+// Format) — a JSON tree, NOT a string. Naively JSON.stringify-ing it dumps
+// unreadable markup into the LLM context AND hides any URL the author entered,
+// because links/smart-links store the actual href in marks/attrs, not in the
+// visible text. This walker produces clean text and ALWAYS surfaces URLs
+// (link hrefs, inline/smart cards) so downstream test generation can ground
+// its steps and preconditions on the real application URL.
+function adfToText(node: any): string {
+    if (node == null) return '';
+    if (typeof node === 'string') return node;
+    if (Array.isArray(node)) return node.map(adfToText).join('');
+
+    switch (node.type) {
+        case 'doc':
+            return (node.content || []).map(adfToText).join('\n');
+        case 'paragraph':
+        case 'heading':
+            return (node.content || []).map(adfToText).join('') + '\n';
+        case 'text': {
+            const t = node.text || '';
+            const link = (node.marks || []).find((m: any) => m.type === 'link');
+            const href = link?.attrs?.href;
+            if (href && href !== t) return `${t} (${href})`;
+            if (href) return href;
+            return t;
+        }
+        case 'hardBreak':
+            return '\n';
+        case 'inlineCard':
+        case 'blockCard':
+        case 'embedCard':
+            return node.attrs?.url ? `${node.attrs.url} ` : '';
+        case 'bulletList':
+            return (node.content || []).map((li: any) => `- ${adfToText(li).trim()}`).join('\n') + '\n';
+        case 'orderedList':
+            return (node.content || []).map((li: any, i: number) => `${i + 1}. ${adfToText(li).trim()}`).join('\n') + '\n';
+        case 'listItem':
+        case 'blockquote':
+        case 'codeBlock':
+            return (node.content || []).map(adfToText).join('') + '\n';
+        case 'rule':
+        case 'mediaSingle':
+        case 'mediaGroup':
+            return '';
+        case 'table':
+            return (node.content || []).map(adfToText).join('\n') + '\n';
+        case 'tableRow':
+            return (node.content || []).map((c: any) => adfToText(c).trim()).join(' | ');
+        case 'tableHeader':
+        case 'tableCell':
+            return (node.content || []).map(adfToText).join(' ');
+        default:
+            if (node.content) return (node.content || []).map(adfToText).join('');
+            if (node.attrs?.url) return String(node.attrs.url);
+            if (node.text) return String(node.text);
+            return '';
+    }
+}
+
+// Convert a Jira description field (ADF object | string | null) to clean text.
+function jiraDescriptionToText(desc: any): string {
+    if (!desc) return '';
+    if (typeof desc === 'string') return desc;
+    try {
+        return adfToText(desc).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    } catch {
+        return typeof desc === 'object' ? JSON.stringify(desc) : String(desc);
+    }
+}
+
 app.post('/api/jira/search', async (req, res) => {
     try {
         const { connection, projectKey, sprintVersion } = req.body;
@@ -1653,7 +1724,7 @@ app.post('/api/jira/search', async (req, res) => {
                     id: issue.id,
                     key: issue.key,
                     summary: issue.fields.summary,
-                    description: typeof issue.fields.description === 'string' ? issue.fields.description : JSON.stringify(issue.fields.description) || '',
+                    description: jiraDescriptionToText(issue.fields.description),
                     status: issue.fields.status.name
                 }));
                 return res.json({ issues });
