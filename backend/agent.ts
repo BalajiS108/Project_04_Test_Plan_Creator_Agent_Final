@@ -2889,27 +2889,46 @@ Step ${stepNum} of ${tc.steps.length}: ${stepText}`;
             console.log(`     ↳ ${stepActions.length} tool call(s): ${dbg}`);
             if (stepFailureReason) console.log(`     ↳ FAILURE: ${stepFailureReason}`);
             const anyFailed = realActions.some(a => !a.success);
-            const passiveLooking = /\b(leave\s+\w+\s+(?:field\s+)?empty|empty|blank|do\s+not|don'?t|without|wait|observe|verify|confirm)\b/i.test(stepText);
+            // "Passive" = a step that legitimately needs no browser action (observe/
+            // verify/review). NOTE: deliberately excludes "check" — "check the
+            // checkbox" is an ACTION, not an observation.
+            const passiveLooking = /\b(leave\s+\w+\s+(?:field\s+)?empty|empty|blank|do\s+not|don'?t|without|wait|observe|verify|confirm|review|validate|ensure|inspect)\b/i.test(stepText);
 
             let resultDetails: string;
             let passed: boolean;
             if (stepFailureReason) {
                 resultDetails = stepFailureReason;
                 passed = false;
-            } else if (!markStepForThis) {
-                resultDetails = `⚠ Step not reached — the agent did not call playwright_mark_step(${stepNum}, ...) within the ${MAX_TURNS_PER_STEP}-turn budget for this step.`;
-                passed = false;
             } else if (anyFailed) {
                 resultDetails = realActions.map(a => `${a.success ? '✅' : '❌'} ${describeUIAction(a)}`).join('\n');
                 passed = false;
-            } else if (realActions.length === 0) {
-                resultDetails = passiveLooking
-                    ? 'No browser action required for this step (passive: acknowledged, condition satisfied implicitly).'
-                    : 'Step marked but no browser action logged. Consider whether the LLM missed an intended action.';
+            } else if (realActions.length > 0) {
+                // At least one real browser action ran without error → step done.
+                // mark_step is ADVISORY in per-step mode: the orchestrator already
+                // owns the step boundary (one mini-conversation per step), so we
+                // must NOT fail a step just because the LLM forgot to announce it
+                // via mark_step. Judge by what actually happened in the browser.
+                resultDetails = realActions.map(a => `✅ ${describeUIAction(a)}`).join('\n');
+                if (!markStepForThis) resultDetails += `\n(note: agent skipped mark_step(${stepNum}); step judged by its successful browser action)`;
+                passed = true;
+            } else if (passiveLooking) {
+                resultDetails = 'No browser action required for this step (passive: acknowledged, condition satisfied implicitly).';
                 passed = true;
             } else {
-                resultDetails = realActions.map(a => `${a.success ? '✅' : '❌'} ${describeUIAction(a)}`).join('\n');
-                passed = true;
+                // Non-passive step but the agent performed NO browser action — it
+                // most likely could not locate the target element. Capture live
+                // page context so the failure is actionable (this is far more
+                // useful than the old "didn't call mark_step" message).
+                let ctx = '';
+                if (snapshotToolName) {
+                    try {
+                        const r = await client.callTool({ name: snapshotToolName, arguments: {} }).catch(() => null);
+                        const t = (r?.content as any)?.[0]?.text;
+                        if (typeof t === 'string') ctx = `\nPage currently shows: ${t.replace(/\s+/g, ' ').slice(0, 400)}`;
+                    } catch { /* best effort */ }
+                }
+                resultDetails = `⚠ No browser action was performed for this step within the ${MAX_TURNS_PER_STEP}-turn budget — the agent likely could not locate the element for: "${stepText.slice(0, 90)}". Check the element exists / reword the step.${ctx}`;
+                passed = false;
             }
 
             stepResults.push({ step: `Step ${stepNum}: ${stepText}`, result: resultDetails, passed });
