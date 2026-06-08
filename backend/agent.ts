@@ -2888,29 +2888,34 @@ Step ${stepNum} of ${tc.steps.length}: ${stepText}`;
             const dbg = stepActions.map(a => `${a.success ? '✓' : '✗'} ${a.tool}${a.tool === 'playwright_mark_step' ? `(stepIndex=${a.args?.stepIndex})` : ''}`).join(', ') || '(no tool calls)';
             console.log(`     ↳ ${stepActions.length} tool call(s): ${dbg}`);
             if (stepFailureReason) console.log(`     ↳ FAILURE: ${stepFailureReason}`);
-            const anyFailed = realActions.some(a => !a.success);
             // "Passive" = a step that legitimately needs no browser action (observe/
             // verify/review). NOTE: deliberately excludes "check" — "check the
             // checkbox" is an ACTION, not an observation.
             const passiveLooking = /\b(leave\s+\w+\s+(?:field\s+)?empty|empty|blank|do\s+not|don'?t|without|wait|observe|verify|confirm|review|validate|ensure|inspect)\b/i.test(stepText);
+            // RETRY-TOLERANT: a step that tries selector A (fails), then selector B
+            // (succeeds) is a SUCCESS — that recovery is exactly the behavior the
+            // prompt asks for. So judge by whether the step ENDED on a successful
+            // action, not by whether any intermediate attempt failed. Earlier
+            // failed attempts are shown as "↻ retried" rather than failing the step.
+            const lastUi = realActions[realActions.length - 1];
+            const hadRetries = realActions.some(a => !a.success);
 
             let resultDetails: string;
             let passed: boolean;
             if (stepFailureReason) {
                 resultDetails = stepFailureReason;
                 passed = false;
-            } else if (anyFailed) {
+            } else if (realActions.length > 0 && lastUi.success) {
+                // Ended on a successful browser action → step done. (mark_step is
+                // advisory in per-step mode — the orchestrator owns the boundary.)
+                resultDetails = realActions.map(a => `${a.success ? '✅' : '↻'} ${describeUIAction(a)}`).join('\n');
+                if (hadRetries) resultDetails = `(recovered after retrying a selector)\n${resultDetails}`;
+                if (!markStepForThis) resultDetails += `\n(note: agent skipped mark_step(${stepNum}); judged by successful browser action)`;
+                passed = true;
+            } else if (realActions.length > 0) {
+                // Ended on a FAILED action and never recovered.
                 resultDetails = realActions.map(a => `${a.success ? '✅' : '❌'} ${describeUIAction(a)}`).join('\n');
                 passed = false;
-            } else if (realActions.length > 0) {
-                // At least one real browser action ran without error → step done.
-                // mark_step is ADVISORY in per-step mode: the orchestrator already
-                // owns the step boundary (one mini-conversation per step), so we
-                // must NOT fail a step just because the LLM forgot to announce it
-                // via mark_step. Judge by what actually happened in the browser.
-                resultDetails = realActions.map(a => `✅ ${describeUIAction(a)}`).join('\n');
-                if (!markStepForThis) resultDetails += `\n(note: agent skipped mark_step(${stepNum}); step judged by its successful browser action)`;
-                passed = true;
             } else if (passiveLooking) {
                 resultDetails = 'No browser action required for this step (passive: acknowledged, condition satisfied implicitly).';
                 passed = true;
