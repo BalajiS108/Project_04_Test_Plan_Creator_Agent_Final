@@ -2610,6 +2610,12 @@ SITE CHEATSHEET — saucedemo.com (DOM is stable; USE THESE VERBATIM):
         }
         return null;
     })();
+    const navigateToolName = (() => {
+        for (const name of ['playwright_navigate', 'browser_navigate']) {
+            if (mcpTools.some(t => t.name === name)) return name;
+        }
+        return null;
+    })();
 
     // Best-effort, site-agnostic cookie/consent banner dismissal. These banners
     // overlay the page and intercept clicks (the #1 cause of "could not locate
@@ -2759,11 +2765,34 @@ SITE CHEATSHEET — saucedemo.com (DOM is stable; USE THESE VERBATIM):
                 break;
             }
 
-            // Build per-step navigation hint. On step 1 the browser is fresh
-            // so we explicitly tell the LLM to navigate to the test URL.
-            const navigationHint = stepNum === 1 && urlFromPreconditions
-                ? `\n\nIMPORTANT — STEP 1 STARTUP: The browser is on a blank page. Your FIRST browser action (after playwright_mark_step) MUST be to navigate to:\n   ${urlFromPreconditions}\nUsing: playwright_navigate(url="${urlFromPreconditions}") (or your client's navigate tool). Do NOT navigate to "#" or any URL without http(s)://. Then perform the step.`
-                : '';
+            // DETERMINISTIC STEP-1 NAVIGATION. The browser starts blank, and
+            // relying on the LLM to navigate first was flaky (it sometimes
+            // narrated or "observed" the blank page instead of navigating, then
+            // ran out of turns having performed no action). So the orchestrator
+            // navigates itself, seeds it as the step's first successful action,
+            // and refreshes the snapshot — the LLM then continues from a loaded
+            // page. (We do this whenever the page is still blank and we have a
+            // URL, not only literally step 1, to be robust.)
+            const seedActions: { tool: string; args: any; success: boolean; message: string }[] = [];
+            let navigationHint = '';
+            const pageIsBlank = !pageSnapshot || pageSnapshot.trim().length < 5;
+            if (stepNum === 1 && urlFromPreconditions && navigateToolName && pageIsBlank) {
+                try {
+                    const navRes = await client.callTool({ name: navigateToolName, arguments: { url: urlFromPreconditions } }).catch(() => null);
+                    const ok = !!navRes && !(navRes as any).isError;
+                    seedActions.push({ tool: navigateToolName, args: { url: urlFromPreconditions }, success: ok, message: `${navigateToolName}(${urlFromPreconditions})` });
+                    console.log(`     🌐 Auto-navigated to ${urlFromPreconditions} (${ok ? 'ok' : 'failed'}).`);
+                    pageSnapshot = await readSnapshot();
+                    if (/\b(cookie|consent|privacy policy|gdpr)\b/i.test(pageSnapshot)) {
+                        if (await dismissConsentBanner()) pageSnapshot = await readSnapshot();
+                    }
+                    navigationHint = `\n\nNOTE: The browser has ALREADY been navigated to ${urlFromPreconditions} for you. Do NOT navigate again — proceed directly with the rest of this step on the loaded page.`;
+                } catch {
+                    navigationHint = `\n\nIMPORTANT — STEP 1: navigate to ${urlFromPreconditions} via playwright_navigate FIRST, then perform the step.`;
+                }
+            } else if (stepNum === 1 && urlFromPreconditions) {
+                navigationHint = `\n\nIMPORTANT — STEP 1: if not already there, navigate to ${urlFromPreconditions} via playwright_navigate FIRST, then perform the step.`;
+            }
 
             const systemPrompt = `You are executing ONE STEP of a Playwright browser test using the available playwright_* tools. Do ONLY this step, then STOP — no verdict, no other steps. The orchestrator calls you again for the next step.
 
@@ -2834,7 +2863,7 @@ Step ${stepNum} of ${tc.steps.length}: ${stepText}`;
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userPrompt },
             ];
-            const stepActions: { tool: string; args: any; success: boolean; message: string }[] = [];
+            const stepActions: { tool: string; args: any; success: boolean; message: string }[] = [...seedActions];
             let stepFailureReason: string | undefined;
 
             for (let turn = 0; turn < MAX_TURNS_PER_STEP; turn++) {
@@ -2857,7 +2886,20 @@ Step ${stepNum} of ${tc.steps.length}: ${stepText}`;
 
                 const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
                 if (toolCalls.length === 0) {
-                    // LLM stopped calling tools → step is done (per our prompt).
+                    // No tool call this turn. If the agent has ALREADY performed a
+                    // real browser action, treat it as "step done" and stop.
+                    // But if it has done NOTHING yet (it just replied with text /
+                    // planning), don't bail — nudge it to actually act and keep
+                    // going. This is the #1 cause of "no browser action performed":
+                    // the model narrates instead of calling a tool on turn 1.
+                    const actedAlready = stepActions.some(a => a.tool !== 'playwright_mark_step');
+                    if (!actedAlready && turn < MAX_TURNS_PER_STEP - 1) {
+                        messages.push({
+                            role: 'user',
+                            content: 'You responded without calling a tool. Do NOT explain or plan in text — CALL a playwright_* tool now to actually perform this step (e.g. playwright_navigate to the Test URL, then playwright_get_input_fields / playwright_fill / playwright_click). Act now.',
+                        });
+                        continue;
+                    }
                     break;
                 }
 
