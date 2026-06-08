@@ -421,6 +421,58 @@ async function getTargetFrame(iframeSelector?: string): Promise<Page | import("p
     return page;
 }
 
+// Self-healing input resolver. When a literal selector matches nothing (the LLM
+// guessed e.g. input[type='email'] for an Okta field that's actually a #username
+// text box), find the most likely matching input from hints parsed out of the
+// failed selector + the value, and return a usable selector. This removes the
+// whole class of "guessed the wrong selector → fill failed" errors.
+async function smartResolveInput(target: Page | Frame, failedSelector: string, value: string): Promise<string | null> {
+    const sel = String(failedSelector || '');
+    const wantPassword = /password/i.test(sel);
+    const wantEmail = /email|mail/i.test(sel) || /@/.test(String(value || ''));
+    const noise = ['input', 'textarea', 'select', 'type', 'name', 'placeholder', 'aria', 'label', 'value', 'text', 'css', 'class', 'div', 'span', 'button'];
+    const keywords = Array.from(sel.matchAll(/['"]([^'"]+)['"]/g))
+        .flatMap(m => m[1].toLowerCase().split(/[\s_-]+/))
+        .concat(sel.replace(/[^a-zA-Z]+/g, ' ').toLowerCase().split(/\s+/))
+        .filter(w => w && w.length > 2 && noise.indexOf(w) === -1);
+    try {
+        const resolved = await (target as any).evaluate((h: any) => {
+            const cands = Array.from(document.querySelectorAll('input, textarea')).filter((el: any) => {
+                const t = (el.getAttribute('type') || 'text').toLowerCase();
+                if (['hidden', 'submit', 'button', 'checkbox', 'radio', 'file', 'image', 'reset'].indexOf(t) !== -1) return false;
+                const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+                return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && !el.disabled;
+            });
+            const meta = (el: any) => {
+                const id = el.id; let label = '';
+                if (id) { const l = document.querySelector('label[for="' + id + '"]'); if (l) label = (l as any).textContent || ''; }
+                if (!label) { const p = el.closest('label'); if (p) label = (p as any).textContent || ''; }
+                return ((el.getAttribute('placeholder') || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.name || '') + ' ' + (id || '') + ' ' + label).toLowerCase();
+            };
+            let best: any = null, bestScore = -1e9;
+            cands.forEach((el: any, i: number) => {
+                const t = (el.getAttribute('type') || 'text').toLowerCase();
+                const m = meta(el);
+                let score = 0;
+                if (h.wantPassword) score += t === 'password' ? 100 : -80;
+                else score += t === 'password' ? -100 : 0;
+                if (h.wantEmail && (t === 'email' || m.indexOf('email') !== -1 || m.indexOf('mail') !== -1 || m.indexOf('user') !== -1)) score += 25;
+                (h.keywords || []).forEach((k: string) => { if (k && m.indexOf(k) !== -1) score += 12; });
+                if (t === 'text' || t === 'email') score += 2;
+                if (!el.value) score += 3;
+                score -= i * 0.1;
+                if (score > bestScore) { bestScore = score; best = el; }
+            });
+            if (!best) return null;
+            if (best.id) return '#' + ((window as any).CSS && CSS.escape ? CSS.escape(best.id) : best.id);
+            if (best.name) return best.tagName.toLowerCase() + '[name="' + best.name + '"]';
+            best.setAttribute('data-tpc-resolved', '1');
+            return '[data-tpc-resolved="1"]';
+        }, { wantPassword, wantEmail, keywords });
+        return (resolved as string) || null;
+    } catch { return null; }
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let name = request.params.name;
     // Safely handle null/undefined arguments (LLM sometimes passes null for no-arg tools)
@@ -549,10 +601,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             case "playwright_fill": {
                 const target = await getTargetFrame(args.iframe as string | undefined);
-                await target.waitForSelector(args.selector as string, { state: 'visible', timeout: 15000 });
-                await highlightElement(target, args.selector as string);
-                await target.fill(args.selector as string, args.value as string, { timeout: 15000 });
-                return { content: [{ type: "text", text: `Successfully filled "${args.selector}" with "${args.value}"` }] };
+                let fillSel = args.selector as string;
+                try {
+                    await target.waitForSelector(fillSel, { state: 'visible', timeout: 8000 });
+                } catch {
+                    const healed = await smartResolveInput(target, fillSel, args.value as string);
+                    if (!healed) throw new Error(`No element matched "${args.selector}" and no similar input could be auto-resolved on the page.`);
+                    fillSel = healed;
+                    await target.waitForSelector(fillSel, { state: 'visible', timeout: 8000 });
+                }
+                await highlightElement(target, fillSel);
+                await target.fill(fillSel, args.value as string, { timeout: 15000 });
+                const note = fillSel !== args.selector ? ` (auto-resolved from "${args.selector}")` : '';
+                return { content: [{ type: "text", text: `Successfully filled "${fillSel}"${note} with "${args.value}"` }] };
             }
 
             case "playwright_fill_form": {
@@ -647,18 +708,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 const delay = (args.delay as number) || 10;
                 const clearFirst = args.clearFirst !== false; // default true
 
+                let typeSel = args.selector as string;
+                try {
+                    await target.waitForSelector(typeSel, { state: 'visible', timeout: 8000 });
+                } catch {
+                    const healed = await smartResolveInput(target, typeSel, args.text as string);
+                    if (!healed) throw new Error(`No element matched "${args.selector}" and no similar input could be auto-resolved on the page.`);
+                    typeSel = healed;
+                    await target.waitForSelector(typeSel, { state: 'visible', timeout: 8000 });
+                }
+
                 // Click the element first to focus it
-                await target.click(args.selector as string, { timeout: 15000 });
+                await target.click(typeSel, { timeout: 15000 });
 
                 if (clearFirst) {
                     // Select all existing text and delete it
-                    await target.press(args.selector as string, "Control+a");
-                    await target.press(args.selector as string, "Backspace");
+                    await target.press(typeSel, "Control+a");
+                    await target.press(typeSel, "Backspace");
                 }
 
                 // Type keystroke by keystroke
-                await target.type(args.selector as string, args.text as string, { delay });
-                return { content: [{ type: "text", text: `Successfully typed "${args.text}" into "${args.selector}"` }] };
+                await target.type(typeSel, args.text as string, { delay });
+                const note = typeSel !== args.selector ? ` (auto-resolved from "${args.selector}")` : '';
+                return { content: [{ type: "text", text: `Successfully typed "${args.text}" into "${typeSel}"${note}` }] };
             }
 
             case "playwright_press_key": {
