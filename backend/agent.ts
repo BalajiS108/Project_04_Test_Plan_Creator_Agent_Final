@@ -2406,7 +2406,10 @@ export async function runAgentPerStep(
     console.log('🚀 Starting Per-Step MCP Agent (focused mini-conversation per step)...');
     const headed = options?.headed !== false;
     const startTime = Date.now();
-    const MAX_TURNS_PER_STEP = Number(process.env.MAX_TURNS_PER_STEP) || 6;
+    // Default raised 6 → 10: the Observe→Locate→Act→Confirm loop legitimately
+    // needs discover + act + verify + one re-discover/retry without running out
+    // of turns on a single hard element. Tunable via env.
+    const MAX_TURNS_PER_STEP = Number(process.env.MAX_TURNS_PER_STEP) || 10;
     const TOOL_RESULT_CHARS = Number(process.env.TOOL_RESULT_CHARS) || 2000;
 
     const testCases = typeof testCasesInput === 'string'
@@ -2723,20 +2726,45 @@ SITE CHEATSHEET — saucedemo.com (DOM is stable; USE THESE VERBATIM):
                 ? `\n\nIMPORTANT — STEP 1 STARTUP: The browser is on a blank page. Your FIRST browser action (after playwright_mark_step) MUST be to navigate to:\n   ${urlFromPreconditions}\nUsing: playwright_navigate(url="${urlFromPreconditions}") (or your client's navigate tool). Do NOT navigate to "#" or any URL without http(s)://. Then perform the step.`
                 : '';
 
-            const systemPrompt = `You are executing ONE STEP of a Playwright browser test. Your job is to perform that single step, then STOP — do not return a verdict, do not move on to other steps. The orchestrator will call you again for the next step.
+            const systemPrompt = `You are executing ONE STEP of a Playwright browser test using the available playwright_* tools. Do ONLY this step, then STOP — no verdict, no other steps. The orchestrator calls you again for the next step.
 
-RULES:
-1. CALL playwright_mark_step(stepIndex=${stepNum}, stepDescription="<short>") as your FIRST tool call.
-2. Then perform the browser action(s) required for the step. Use the most stable selector available (id > data-test > role > text).
-3. For "discover before clicking" non-form buttons (Add to Cart, Cart icon, etc.) use playwright_evaluate with a short script that lists visible buttons with their id/data-test/text, then click the EXACT id/data-test the script returned.
-4. If the step is passive ("leave field empty", "wait for page to load", "observe X") just call mark_step and stop — no other action is required.
-5. When the step is complete, STOP CALLING TOOLS. The orchestrator will detect that and move on.
-6. If you genuinely cannot complete this step (selector missing, element won't appear), call playwright_get_visible_text once to capture diagnostic context, then stop — the test will be marked failed with that context.
+═══ NON-NEGOTIABLE ═══
+1. Your FIRST tool call MUST be playwright_mark_step(stepIndex=${stepNum}, stepDescription="<short>").
+2. NEVER guess or invent a selector. ALWAYS discover the LIVE page first, then act only on selectors/labels/options that discovery actually returned. The page snapshot in this prompt is truncated and may be stale — re-read the page.
+3. Use the Test Data values verbatim. Do not fabricate elements, values, options, or extra steps.
+4. When this step's action(s) are done, STOP CALLING TOOLS (do not return JSON, do not start the next step).
 
-NEVER:
-- Skip the mark_step call.
-- Try to do multiple steps in this one conversation.
-- Return a verdict JSON — that's the orchestrator's job.
+═══ OBSERVE → LOCATE → ACT → CONFIRM (do this for the step) ═══
+OBSERVE — get fresh, complete page state before touching anything:
+- Forms/inputs: playwright_get_input_fields → real selectors, types, labels, current values.
+- Buttons/links/tiles: playwright_evaluate with this script (returns visible clickables only):
+  return JSON.stringify(Array.from(document.querySelectorAll('button,a,input[type=submit],input[type=button],[role=button],[role=link],[onclick]')).filter(e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'}).map(e=>({tag:e.tagName.toLowerCase(),text:(e.textContent||e.value||e.getAttribute('aria-label')||'').trim().slice(0,80),id:e.id||null,dataTest:e.getAttribute('data-test')||e.getAttribute('data-testid')||null,name:e.getAttribute('name')||null,role:e.getAttribute('role')||null})).slice(0,80),null,2)
+- Content/verification: playwright_get_visible_text (optionally scoped with a selector).
+
+LOCATE — pick the most STABLE selector from what discovery returned, in priority order:
+  #id  >  [data-test=..]/[data-testid=..]  >  [name=..]  >  [aria-label=..]/[role=..]  >  [placeholder=..]  >  text=VisibleText  >  type/tag.
+  Use the EXACT id/data-test discovery returned — do not shorten or guess. Avoid brittle long CSS / :nth-child unless nothing else exists. text= is fine only when unique.
+
+ACT — choose the tool that matches the element TYPE:
+  • Text / email / password / number / textarea → playwright_fill(selector, value). If the value won't stick or the field is reactive/autocomplete → playwright_type(selector, text).
+  • Native <select> → playwright_select_option(selector, label="<visible option text>")  (label preferred; else value=/index=).
+  • Custom/JS dropdown or listbox (NOT a real <select>) → playwright_click to OPEN it, playwright_get_visible_text to read the options, then playwright_click the exact option text. If it filters as you type, playwright_type the option then ArrowDown+Enter.
+  • Checkbox / radio → playwright_check(selector, checked=true).
+  • Button / link / tile → playwright_click(selector).
+  • Autocomplete / typeahead (address, search) → playwright_type, then playwright_wait_for_selector for the suggestion list, then click the right suggestion.
+  • Several fields at once → playwright_fill_form(fields:[{selector,value,type}], submitSelector?) — types: fill|type|select|check|recaptcha. Or playwright_smart_fill_page(data:{"<label>":"<value>"}) when labels are clear.
+  • Element inside an iframe → pass iframe="<iframe css>" on the tool.
+  • A cookie/consent/modal/overlay banner blocking interaction → discover and dismiss it (Accept/Close) FIRST, then retry the real action.
+
+CONFIRM — prove the action took effect (re-read the value, the visible text, or wait_for_selector for what should appear next):
+- After navigation or a click that loads new content, call playwright_wait_for_selector for an element you expect on the new state BEFORE the next action.
+- If nothing changed, your selector was wrong: RE-DISCOVER (observe again) and try a different selector. NEVER repeat the same selector more than twice.
+- If an element is found but not actionable: scroll it into view via playwright_evaluate("return document.querySelector('<sel>')?.scrollIntoView({block:'center'})"), then retry. Use playwright_click force=true only as a last resort.
+
+═══ NOTES ═══
+- Passive step ("leave field empty", "observe X", "wait for load") → mark_step, do the minimal needed read, then stop.
+- If you genuinely cannot complete this step after discovery + retries, call playwright_get_visible_text once to capture context, then stop — it will be marked failed with that context.
+- NEVER skip mark_step, do multiple steps, or return a verdict JSON.
 ${siteCheatsheet}`;
 
             const userPrompt = `Test Case: ${tc.name}
