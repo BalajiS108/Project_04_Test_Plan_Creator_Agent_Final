@@ -473,6 +473,63 @@ async function smartResolveInput(target: Page | Frame, failedSelector: string, v
     } catch { return null; }
 }
 
+// Pull the human-meaningful text out of a (possibly failing) click selector:
+// text=Foo, :has-text('Foo'), quoted attr values, or an id/class turned into words.
+function clickHintText(sel: string): string {
+    const s = String(sel || '');
+    const tm = s.match(/text\s*=\s*["']?([^"'\]]+)["']?/i);
+    if (tm) return tm[1].trim();
+    const ht = s.match(/has[-_]?text\(\s*['"]?([^'")]+)['"]?\s*\)/i);
+    if (ht) return ht[1].trim();
+    const q = Array.from(s.matchAll(/['"]([^'"]+)['"]/g)).map(m => m[1]).join(' ').trim();
+    if (q) return q;
+    if (/^[#.]/.test(s)) return s.replace(/^[#.]/, '').replace(/[-_]+/g, ' ').trim();
+    return '';
+}
+
+// Self-healing click resolver. When a literal click selector matches nothing,
+// find the best visible clickable element by fuzzy text match (exact > contains
+// > token overlap). Additive: only used after the literal selector fails, so it
+// can't change behavior of clicks that already work. Returns a usable selector.
+async function smartResolveClickable(target: Page | Frame, failedSelector: string): Promise<string | null> {
+    const want = clickHintText(failedSelector);
+    if (!want) return null;
+    try {
+        const resolved = await (target as any).evaluate((wantRaw: string) => {
+            const norm = (s: any) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+            const want = norm(wantRaw);
+            if (!want) return null;
+            const els = Array.from(document.querySelectorAll('button, a, [role=button], [role=link], [role=menuitem], [role=option], [role=tab], input[type=submit], input[type=button], [onclick], label, li'))
+                .filter((el: any) => {
+                    const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                });
+            const wantTokens = want.split(' ').filter(Boolean);
+            let best: any = null, bestScore = -1;
+            for (const el of els) {
+                const t = norm((el as any).textContent || (el as any).value || el.getAttribute('aria-label'));
+                if (!t || t.length > 120) continue;
+                let score = 0;
+                if (t === want) score = 100;
+                else if (t.indexOf(want) !== -1) score = 80 - (t.length - want.length) * 0.05;
+                else {
+                    const tt = new Set(t.split(' '));
+                    const overlap = wantTokens.filter(w => tt.has(w)).length;
+                    if (overlap > 0) score = 45 * (overlap / wantTokens.length);
+                }
+                const tag = el.tagName.toLowerCase();
+                const role = el.getAttribute('role') || '';
+                if (tag === 'button' || tag === 'a' || role === 'button' || role === 'link') score += 10;
+                if (score > bestScore) { bestScore = score; best = el; }
+            }
+            if (!best || bestScore < 30) return null;
+            best.setAttribute('data-tpc-resolved', '1');
+            return '[data-tpc-resolved="1"]';
+        }, want);
+        return (resolved as string) || null;
+    } catch { return null; }
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let name = request.params.name;
     // Safely handle null/undefined arguments (LLM sometimes passes null for no-arg tools)
@@ -591,12 +648,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             case "playwright_click": {
                 const target = await getTargetFrame(args.iframe as string | undefined);
-                await target.waitForSelector(args.selector as string, { state: 'visible', timeout: 15000 });
-                await highlightElement(target, args.selector as string);
+                let clickSel = args.selector as string;
+                try {
+                    await target.waitForSelector(clickSel, { state: 'visible', timeout: 8000 });
+                } catch {
+                    const healed = await smartResolveClickable(target, clickSel);
+                    if (!healed) throw new Error(`No element matched "${args.selector}" and no similar clickable element could be auto-resolved on the page.`);
+                    clickSel = healed;
+                    await target.waitForSelector(clickSel, { state: 'visible', timeout: 8000 });
+                }
+                await highlightElement(target, clickSel);
                 const opts: any = { timeout: 15000 };
                 if (args.force) opts.force = true;
-                await target.click(args.selector as string, opts);
-                return { content: [{ type: "text", text: `Successfully clicked on "${args.selector}"` }] };
+                await target.click(clickSel, opts);
+                const note = clickSel !== args.selector ? ` (auto-resolved from "${args.selector}")` : '';
+                return { content: [{ type: "text", text: `Successfully clicked on "${clickSel}"${note}` }] };
             }
 
             case "playwright_fill": {
