@@ -87,6 +87,7 @@ export async function generatePlaywrightCode(
 ==== PLAYWRIGHT BEST PRACTICES ====
 - Strict mode: If a selector might match multiple elements, use .first() or .filter({ hasText: '...' }).
 - Waits: Prefer auto-waiting locators (expect(loc).toBeVisible()) over page.waitForTimeout. Use page.waitForSelector before asserting on dynamic content.
+- Navigation: call page.goto(url) WITHOUT waitUntil:'networkidle' — on real sites with analytics/polling, networkidle never settles and goto times out. Use the default, or waitUntil:'domcontentloaded'. After navigating, rely on auto-waiting locators (e.g. await expect(loc).toBeVisible()) instead.
 - Screenshots: Use \`const safeTitle = test.info().title.replace(/[^a-z0-9]/gi, '_');\` for safe filenames.
 - Logs: console.log key actions to aid debugging.
 - Timeouts: Do NOT call test.setTimeout() inside test bodies. The project's playwright.config.ts already provides a 90s per-test budget (which covers beforeEach hooks). A test.setTimeout(60000) inside a test reduces the remaining budget AFTER beforeEach has already consumed time, which causes false timeouts on slow logins. Leave timeouts to the config.
@@ -187,6 +188,14 @@ Start with imports and generate all test code in one file.`;
                 code = match[1].trim();
             }
         }
+
+        // Deterministic sanitization — never trust the LLM to avoid the footguns.
+        // `networkidle` almost never fires on real sites (analytics/polling keep
+        // the network busy), so page.goto/waitForLoadState time out at 30s on the
+        // very first line. Force the reliable 'domcontentloaded' instead.
+        code = code
+            .replace(/waitUntil:\s*['"]networkidle['"]/g, "waitUntil: 'domcontentloaded'")
+            .replace(/waitForLoadState\(\s*['"]networkidle['"]\s*([),])/g, "waitForLoadState('domcontentloaded'$1");
 
         console.log(`✅ Generated ${code.split("\n").length} lines of Playwright code`);
         return code;
