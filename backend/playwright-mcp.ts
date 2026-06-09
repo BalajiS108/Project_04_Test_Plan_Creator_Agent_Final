@@ -427,6 +427,10 @@ async function getTargetFrame(iframeSelector?: string): Promise<Page | import("p
 // failed selector + the value, and return a usable selector. This removes the
 // whole class of "guessed the wrong selector → fill failed" errors.
 async function smartResolveInput(target: Page | Frame, failedSelector: string, value: string): Promise<string | null> {
+    // The form may still be loading (e.g. right after an Okta redirect). Give
+    // inputs a chance to appear before we try to resolve — otherwise we'd
+    // "find nothing" purely because of timing.
+    try { await (target as any).waitForSelector('input, textarea', { state: 'visible', timeout: 10000 }); } catch { /* proceed anyway */ }
     const sel = String(failedSelector || '');
     const wantPassword = /password/i.test(sel);
     const wantEmail = /email|mail/i.test(sel) || /@/.test(String(value || ''));
@@ -494,6 +498,8 @@ function clickHintText(sel: string): string {
 async function smartResolveClickable(target: Page | Frame, failedSelector: string): Promise<string | null> {
     const want = clickHintText(failedSelector);
     if (!want) return null;
+    // Let the page settle (post-navigation) before scanning for clickables.
+    try { await (target as any).waitForSelector('button, a, [role=button], [role=link]', { state: 'visible', timeout: 8000 }); } catch { /* proceed anyway */ }
     try {
         const resolved = await (target as any).evaluate((wantRaw: string) => {
             const norm = (s: any) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -650,7 +656,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 const target = await getTargetFrame(args.iframe as string | undefined);
                 let clickSel = args.selector as string;
                 try {
-                    await target.waitForSelector(clickSel, { state: 'visible', timeout: 8000 });
+                    await target.waitForSelector(clickSel, { state: 'visible', timeout: 12000 });
                 } catch {
                     const healed = await smartResolveClickable(target, clickSel);
                     if (!healed) throw new Error(`No element matched "${args.selector}" and no similar clickable element could be auto-resolved on the page.`);
@@ -669,7 +675,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 const target = await getTargetFrame(args.iframe as string | undefined);
                 let fillSel = args.selector as string;
                 try {
-                    await target.waitForSelector(fillSel, { state: 'visible', timeout: 8000 });
+                    await target.waitForSelector(fillSel, { state: 'visible', timeout: 12000 });
                 } catch {
                     const healed = await smartResolveInput(target, fillSel, args.value as string);
                     if (!healed) throw new Error(`No element matched "${args.selector}" and no similar input could be auto-resolved on the page.`);
@@ -776,7 +782,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
                 let typeSel = args.selector as string;
                 try {
-                    await target.waitForSelector(typeSel, { state: 'visible', timeout: 8000 });
+                    await target.waitForSelector(typeSel, { state: 'visible', timeout: 12000 });
                 } catch {
                     const healed = await smartResolveInput(target, typeSel, args.text as string);
                     if (!healed) throw new Error(`No element matched "${args.selector}" and no similar input could be auto-resolved on the page.`);
