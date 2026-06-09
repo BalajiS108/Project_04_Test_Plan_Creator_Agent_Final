@@ -7,9 +7,12 @@ interface LoginScreenProps {
   // becomes the admin (no existing admin needed to create it).
   bootstrapMode: boolean;
   onAuthenticated: (user: AuthUser) => void;
+  // Optional banner (e.g. "Your session expired — please sign in again"),
+  // shown when the user was bounced back here by a 401.
+  notice?: string | null;
 }
 
-export const LoginScreen: React.FC<LoginScreenProps> = ({ bootstrapMode, onAuthenticated }) => {
+export const LoginScreen: React.FC<LoginScreenProps> = ({ bootstrapMode, onAuthenticated, notice }) => {
   const [mode, setMode] = useState<'login' | 'register'>(bootstrapMode ? 'register' : 'login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -68,6 +71,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ bootstrapMode, onAuthe
             </p>
           </div>
         </div>
+
+        {notice && (
+          <div className="mb-6 px-4 py-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2 dark:bg-amber-900/20 dark:border-amber-800 dark:text-amber-300">
+            <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
+            <span>{notice}</span>
+          </div>
+        )}
 
         {bootstrapMode && (
           <div className="mb-6 px-4 py-3 rounded-xl bg-blue-50 border border-blue-100 text-blue-700 text-xs dark:bg-blue-900/20 dark:border-blue-800 dark:text-blue-300">

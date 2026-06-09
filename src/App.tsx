@@ -11,7 +11,7 @@ import { ApiTesting } from './components/ApiTesting'
 import { CICDDashboard } from './components/CICDDashboard'
 import { PerformanceTesting } from './components/PerformanceTesting'
 import { LoginScreen } from './components/LoginScreen'
-import { fetchAuthStatus, restoreSession, clearSession, AuthUser } from './services/authService'
+import { fetchAuthStatus, restoreSession, clearSession, installAuthInterceptor, registerUnauthorizedHandler, AuthUser } from './services/authService'
 import { Connection, LLMConfig, JiraIssue, InputSourceType } from './types'
 import { fetchJiraIssues } from './services/jiraFetcher'
 import { fetchFromBrd, fetchFromHtml, fetchFromFigma } from './services/inputSources'
@@ -27,6 +27,9 @@ function App() {
   const [authEnabled, setAuthEnabled] = useState(false)
   const [authBootstrap, setAuthBootstrap] = useState(false)
   const [authUser, setAuthUser] = useState<AuthUser | null>(null)
+  // Banner shown on the login screen when a 401 bounced the user back (e.g.
+  // expired token). Cleared on successful sign-in.
+  const [authNotice, setAuthNotice] = useState<string | null>(null)
   const [connections, setConnections] = useState<Connection[]>([])
   const [activeConnection, setActiveConnection] = useState<Connection | null>(null)
   const [llmConfig, setLlmConfig] = useState<LLMConfig | null>(null)
@@ -62,6 +65,13 @@ function App() {
   // If auth is off, the rest of the app behaves identically to before.
   useEffect(() => {
     let cancelled = false;
+    // Bounce the user to the login screen (with a reason) whenever any authed
+    // request 401s because the stored token expired/was invalidated.
+    installAuthInterceptor();
+    registerUnauthorizedHandler((reason) => {
+      setAuthUser(null);
+      setAuthNotice(reason);
+    });
     (async () => {
       try {
         const status = await fetchAuthStatus();
@@ -85,6 +95,7 @@ function App() {
   const handleAuthenticated = (user: AuthUser) => {
     setAuthUser(user);
     setAuthBootstrap(false);
+    setAuthNotice(null);
   };
 
   const handleLogout = () => {
@@ -357,7 +368,7 @@ function App() {
     return <div className="min-h-screen flex items-center justify-center text-slate-400 dark:text-slate-500 text-sm">Loading…</div>;
   }
   if (authEnabled && !authUser) {
-    return <LoginScreen bootstrapMode={authBootstrap} onAuthenticated={handleAuthenticated} />;
+    return <LoginScreen bootstrapMode={authBootstrap} onAuthenticated={handleAuthenticated} notice={authNotice} />;
   }
 
   return (

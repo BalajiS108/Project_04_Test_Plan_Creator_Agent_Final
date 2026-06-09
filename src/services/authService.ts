@@ -39,6 +39,39 @@ export const authHeaders = (): Record<string, string> => {
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
+/**
+ * Global 401 handler. When auth is enabled and a saved token expires/becomes
+ * invalid, the app still *thinks* it's logged in (it trusts the stored token
+ * without re-verifying), so every authed call silently 401s — the user sees
+ * "Jira fetch failed" / "not connected" with no hint to re-login. This installs
+ * a single axios response interceptor that, on a 401 from any NON-auth endpoint
+ * while a token is present, clears the session and notifies the app to show the
+ * login screen. Bad-credential 401s from the login endpoint are ignored here
+ * (LoginScreen handles those inline) so we don't loop.
+ */
+let onUnauthorized: ((reason: string) => void) | null = null;
+export const registerUnauthorizedHandler = (fn: (reason: string) => void) => { onUnauthorized = fn; };
+
+let interceptorInstalled = false;
+export const installAuthInterceptor = () => {
+  if (interceptorInstalled) return;
+  interceptorInstalled = true;
+  axios.interceptors.response.use(
+    (res) => res,
+    (error) => {
+      const status = error?.response?.status;
+      const url: string = error?.config?.url || '';
+      const isAuthEndpoint = /\/api\/auth\/(login|register|status)/.test(url);
+      const hasToken = !!localStorage.getItem(TOKEN_KEY);
+      if (status === 401 && hasToken && !isAuthEndpoint) {
+        clearSession();
+        onUnauthorized?.('Your session has expired. Please sign in again.');
+      }
+      return Promise.reject(error);
+    },
+  );
+};
+
 export const fetchAuthStatus = async (): Promise<AuthStatus> => {
   const res = await axios.get(`${backendUrl()}/api/auth/status`, { timeout: 10000 });
   return res.data;
