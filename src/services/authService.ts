@@ -61,9 +61,13 @@ export const installAuthInterceptor = () => {
     (error) => {
       const status = error?.response?.status;
       const url: string = error?.config?.url || '';
+      // ONLY treat 401s from OUR backend as session expiry. Third-party 401s —
+      // e.g. an invalid LLM API key (api.openai.com / groq / gemini) or a direct
+      // Jira call — must NOT log the user out of the app.
+      const isOurBackend = url.startsWith('/api') || url.startsWith(backendUrl());
       const isAuthEndpoint = /\/api\/auth\/(login|register|status)/.test(url);
       const hasToken = !!localStorage.getItem(TOKEN_KEY);
-      if (status === 401 && hasToken && !isAuthEndpoint) {
+      if (status === 401 && hasToken && isOurBackend && !isAuthEndpoint) {
         clearSession();
         onUnauthorized?.('Your session has expired. Please sign in again.');
       }

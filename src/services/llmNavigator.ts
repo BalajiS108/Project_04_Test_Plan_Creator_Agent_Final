@@ -48,6 +48,7 @@ export const generateTestPlanResult = async (
       headers['Authorization'] = `Bearer ${apiKey}`;
     }
 
+    let result: string | undefined;
     if (provider === 'Ollama') {
       const base = baseUrl.replace(/\/$/, '');
       const endpoint = base.includes('/api') || base.includes('/v1') 
@@ -58,7 +59,7 @@ export const generateTestPlanResult = async (
         prompt: fullPrompt,
         stream: false
       }, { headers, timeout: 60000 });
-      return response.data.response;
+      result = response.data.response;
     } else if (provider === 'Groq') {
       const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
       const groqModel = model === 'llama3' || model === '' ? 'llama3-70b-8192' : model;
@@ -72,7 +73,7 @@ export const generateTestPlanResult = async (
         headers,
         timeout: 60000
       });
-      return response.data.choices[0].message.content;
+      result = response.data?.choices?.[0]?.message?.content;
 
     } else if (provider === 'OpenAI') {
       const endpoint = 'https://api.openai.com/v1/chat/completions';
@@ -87,7 +88,7 @@ export const generateTestPlanResult = async (
         headers,
         timeout: 60000
       });
-      return response.data.choices[0].message.content;
+      result = response.data?.choices?.[0]?.message?.content;
 
     } else if (provider === 'Gemini') {
       const endpoint = `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`;
@@ -102,11 +103,19 @@ export const generateTestPlanResult = async (
         headers,
         timeout: 60000
       });
-      return response.data.choices[0].message.content;
+      result = response.data?.choices?.[0]?.message?.content;
 
     } else {
       throw new Error(`Provider ${provider} not supported for generation yet.`);
     }
+
+    // Guard against a silent empty completion. Without this the caller sets an
+    // empty plan and the UI spins on "Generating Plan…" forever. Surfacing a
+    // clear error instead sends the user back to the previous step with a reason.
+    if (typeof result !== 'string' || !result.trim()) {
+      throw new Error(`The ${provider} model returned an empty response. Likely an invalid/expired API key, an unknown model name ("${model || 'default'}"), or a quota/safety block. Check Settings → LLM and try again.`);
+    }
+    return result;
   } catch (error: any) {
     const errorDetails = error.response?.data?.error?.message || error.response?.data?.error || error.response?.data || error.message;
     throw new Error(`LLM Error: ${typeof errorDetails === 'object' ? JSON.stringify(errorDetails) : errorDetails}`);
