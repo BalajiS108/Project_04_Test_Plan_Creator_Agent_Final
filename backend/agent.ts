@@ -2982,6 +2982,18 @@ Step ${stepNum} of ${tc.steps.length}: ${stepText}`;
             // verify/review). NOTE: deliberately excludes "check" — "check the
             // checkbox" is an ACTION, not an observation.
             const passiveLooking = /\b(leave\s+\w+\s+(?:field\s+)?empty|empty|blank|do\s+not|don'?t|without|wait|observe|verify|confirm|review|validate|ensure|inspect)\b/i.test(stepText);
+            // CONDITIONAL step ("If a pop-up appears, click Close", "if present",
+            // "optional"): the action only applies WHEN a trigger is on the page.
+            // If the element isn't there, the condition simply wasn't met — that's
+            // a SKIP/PASS, not a failure.
+            const conditionalStep = (/\bif\b/i.test(stepText) && /\b(appears?|present|visible|shown|displayed|pop-?up|exists?|any)\b/i.test(stepText))
+                || /^\s*if\b/i.test(stepText)
+                || /\b(optional|if\s+present|if\s+visible|if\s+shown|if\s+any)\b/i.test(stepText);
+            // NEGATIVE test case (invalid login, wrong data → an error is the
+            // EXPECTED result). For these, an error message appearing is a PASS,
+            // so the outcome check below must NOT flip it to fail.
+            const negCtx = `${tc.name || ''} ${tc.expectedResult || ''} ${stepText}`.toLowerCase();
+            const expectsError = /\b(invalid|incorrect|wrong|negative|do not match|does not match|rejected|denied|unauthor|blocked|should not|cannot|can'?t|unable|locked[\s-]?out|not\s+be\s+able|error\s+message|error\s+is\s+shown|error\s+appears)\b/.test(negCtx);
             // RETRY-TOLERANT: a step that tries selector A (fails), then selector B
             // (succeeds) is a SUCCESS — that recovery is exactly the behavior the
             // prompt asks for. So judge by whether the step ENDED on a successful
@@ -3002,12 +3014,22 @@ Step ${stepNum} of ${tc.steps.length}: ${stepText}`;
                 if (hadRetries) resultDetails = `(recovered after retrying a selector)\n${resultDetails}`;
                 if (!markStepForThis) resultDetails += `\n(note: agent skipped mark_step(${stepNum}); judged by successful browser action)`;
                 passed = true;
+            } else if (realActions.length > 0 && conditionalStep) {
+                // Conditional step whose action failed → the trigger element
+                // wasn't actionable/present, so the condition didn't apply. Skip.
+                resultDetails = `Conditional step skipped — its trigger wasn't present/actionable, so there was nothing to do: "${stepText.slice(0, 90)}".`;
+                passed = true;
             } else if (realActions.length > 0) {
                 // Ended on a FAILED action and never recovered.
                 resultDetails = realActions.map(a => `${a.success ? '✅' : '❌'} ${describeUIAction(a)}`).join('\n');
                 passed = false;
             } else if (passiveLooking) {
                 resultDetails = 'No browser action required for this step (passive: acknowledged, condition satisfied implicitly).';
+                passed = true;
+            } else if (conditionalStep) {
+                // Conditional step with no action taken → its trigger never
+                // appeared, so nothing to do. That's a pass (skipped), not a fail.
+                resultDetails = `Conditional step skipped — its trigger did not occur (element not present), so nothing to do: "${stepText.slice(0, 90)}".`;
                 passed = true;
             } else {
                 // Non-passive step but the agent performed NO browser action — it
@@ -3032,7 +3054,7 @@ Step ${stepNum} of ${tc.steps.length}: ${stepText}`;
             // message appears that wasn't on the page before the step, the action
             // did not actually succeed — flip PASS to FAIL. Kept tight + diff-based
             // (only NEW text) so it won't false-fail normal steps.
-            if (passed && realActions.length > 0 && /\b(log\s?in|sign\s?in|log\s?on|submit|continue|next|proceed|pay|checkout|review my donation|place order)\b/i.test(stepText)) {
+            if (passed && !expectsError && realActions.length > 0 && /\b(log\s?in|sign\s?in|log\s?on|submit|continue|next|proceed|pay|checkout|review my donation|place order)\b/i.test(stepText)) {
                 const afterText = await readSnapshot();
                 const before = pageSnapshot.toLowerCase();
                 const after = afterText.toLowerCase();
