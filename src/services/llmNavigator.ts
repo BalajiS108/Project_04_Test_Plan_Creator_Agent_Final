@@ -58,8 +58,14 @@ export const generateTestPlanResult = async (
         model,
         prompt: fullPrompt,
         stream: false
-      }, { headers, timeout: 60000 });
-      result = response.data.response;
+      }, { headers, timeout: 120000 });
+      // Ollama reports failures in `error` (often with HTTP 200), e.g. model not
+      // found, cloud session expired, or auth required. Surface that real message
+      // instead of the generic "empty response" fallback.
+      if (response.data?.error) {
+        throw new Error(`Ollama error: ${typeof response.data.error === 'string' ? response.data.error : JSON.stringify(response.data.error)}`);
+      }
+      result = response.data?.response;
     } else if (provider === 'Groq') {
       const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
       const groqModel = model === 'llama3' || model === '' ? 'llama3-70b-8192' : model;
@@ -113,7 +119,10 @@ export const generateTestPlanResult = async (
     // empty plan and the UI spins on "Generating Plan…" forever. Surfacing a
     // clear error instead sends the user back to the previous step with a reason.
     if (typeof result !== 'string' || !result.trim()) {
-      throw new Error(`The ${provider} model returned an empty response. Likely an invalid/expired API key, an unknown model name ("${model || 'default'}"), or a quota/safety block. Check Settings → LLM and try again.`);
+      const reasoningHint = provider === 'Ollama'
+        ? ` The model "${model || 'default'}" ran but returned no final text — this happens with REASONING models (e.g. gpt-oss, which emit only "thinking" tokens) on some Ollama builds. Switch to a standard instruct model (e.g. qwen2.5, llama3.1, mistral) in Settings → LLM, or update Ollama and re-pull the model.`
+        : ` Likely an invalid/expired API key, an unknown model name ("${model || 'default'}"), or a quota/safety block. Check Settings → LLM and try again.`;
+      throw new Error(`The ${provider} model returned an empty response.${reasoningHint}`);
     }
     return result;
   } catch (error: any) {
